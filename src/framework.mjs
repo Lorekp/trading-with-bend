@@ -118,7 +118,9 @@ export class Backtest {
   constructor(config, options = {}) {
     keys(options, ['traceMode', 'orderStorage'], 'options');
     const traceMode = options.traceMode === undefined ? 'full' : options.traceMode;
-    const orderStorage = options.orderStorage === undefined ? 'all' : options.orderStorage;
+    // Historical orders belong in the audit archive, outside Bend matching and
+    // reservation scans. 'all' is retained only as the bounded reference mode.
+    const orderStorage = options.orderStorage === undefined ? 'active' : options.orderStorage;
     requireThat(traceMode === 'full' || traceMode === 'compact', 'TRACE_MODE', 'traceMode must be full or compact');
     requireThat(orderStorage === 'all' || orderStorage === 'active', 'ORDER_STORAGE', 'orderStorage must be all or active');
     const verification = JSON.parse(readFileSync(new URL('../build/verification.json', import.meta.url), 'utf8'));
@@ -316,9 +318,13 @@ export function runStrategy(config, ticks, onTick, options = {}) {
   requireThat(lookback === undefined || requiredLookback === undefined || lookback >= requiredLookback, 'STRATEGY_LOOKBACK', 'lookback must cover the strategy history requirement');
   const run = new Backtest(config, { ...(options.traceMode === undefined ? {} : { traceMode: options.traceMode }), ...(options.orderStorage === undefined ? {} : { orderStorage: options.orderStorage }) }), history = [];
   config = run.config;
-  let sequence = 0n, orderId = 0n, tickCount = 0;
+  let sequence = 0n, orderId = 0n, tickCount = 0, sourceSequence = null;
   for (const tick of ticks) {
     requireThat(tick.type === 'tick', 'STRATEGY_INPUT', 'runStrategy accepts ticks only');
+    validateEvent(tick, run.config);
+    const nextSourceSequence = BigInt(tick.sequence);
+    requireThat(sourceSequence === null || nextSourceSequence > sourceSequence, 'OUT_OF_ORDER', 'Input quote sequence numbers must strictly increase');
+    sourceSequence = nextSourceSequence;
     run.step({ ...tick, sequence: String(++sequence) }); history.push(freeze(structuredClone(tick))); tickCount++;
     if (lookback !== undefined && history.length > lookback) history.shift();
     const decisions = onTick(freeze({ config, history: history.slice(), tickCount, ledger: run.ledger, orders: run.workingOrders })) || [];

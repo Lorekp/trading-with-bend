@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fork, spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { runtimeProvenance } from './provenance.mjs';
+import { hash } from './core.mjs';
 
 export class ExperimentError extends Error {
   constructor(code, message) { super(message); this.name = 'ExperimentError'; this.code = code; }
@@ -157,10 +158,19 @@ function inspectJob(jobDirectory) {
  * in the returned population. Previous attempts are never discarded. */
 export function listExperiments(root) {
   const jobs = join(resolve(root), 'jobs');
-  let entries;
-  try { entries = readdirSync(jobs, { withFileTypes: true }); }
-  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
-  return entries.filter(entry => entry.isDirectory() && /^[0-9a-f]{64}$/.test(entry.name)).map(entry => inspectJob(join(jobs, entry.name))).filter(Boolean).sort((a, b) => compare(a.key, b.key));
+  const entries = path => {
+    try { return readdirSync(path, { withFileTypes: true }); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  };
+  const queued = entries(jobs).filter(entry => entry.isDirectory() && /^[0-9a-f]{64}$/.test(entry.name)).map(entry => inspectJob(join(jobs, entry.name))).filter(Boolean);
+  // Synchronous CLI trials publish UUID records before work starts. Include
+  // them in the same audit population even when no queue directory exists.
+  const inline = entries(resolve(root)).filter(entry => entry.isFile() && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/.test(entry.name)).map(entry => {
+    const record = read(join(resolve(root), entry.name));
+    assert(entry.name === `${record.id}.json` && ['running', 'completed', 'failed'].includes(record.status) && record.configurationHash === hash(record.configuration), 'REGISTRY_CORRUPT', 'Inline trial does not match its identity, status or configuration hash');
+    return { ...record, key: record.id, execution: 'inline', attempts: [{ ...record }] };
+  });
+  return [...queued, ...inline].sort((a, b) => compare(a.key, b.key));
 }
 
 function alive(pid) {

@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { listExperiments } from '../src/experiments.mjs';
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const input = fileURLToPath(new URL('../examples/demo.json', import.meta.url));
@@ -22,6 +23,7 @@ test('concurrent CLI runs create distinct reports and retain both experiment rec
   const paths = results.map(r => JSON.parse(r.out).report); assert.notEqual(paths[0], paths[1]);
   for (const path of paths) assert.equal(JSON.parse(readFileSync(join(root, path), 'utf8')).performance.netPnl, '260');
   assert.equal(readdirSync(join(root, 'output/experiments')).length, 2);
+  assert.deepEqual(listExperiments(join(root, 'output/experiments')).map(record => record.status), ['completed', 'completed']);
 });
 test('an explicit report collision fails instead of overwriting another agent output', async t => {
   const root = mkdtempSync(join(tmpdir(), 'bend-cli-')); t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -30,4 +32,5 @@ test('an explicit report collision fails instead of overwriting another agent ou
   assert.equal(JSON.parse(results.find(r => r.code === 1).err).code, 'EEXIST');
   const records = readdirSync(join(root, 'output/experiments')).map(file => JSON.parse(readFileSync(join(root, 'output/experiments', file), 'utf8')));
   assert.deepEqual(records.map(r => r.status).sort(), ['completed', 'failed']);
+  assert.deepEqual(listExperiments(join(root, 'output/experiments')).map(record => record.status).sort(), ['completed', 'failed']);
 });
