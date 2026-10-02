@@ -1,4 +1,4 @@
-import { runStrategy } from '../src/framework.mjs';
+import { runStrategy, quoteInformationSource, QuoteExecutionVenue } from '../src/index.mjs';
 import { json } from '../src/core.mjs';
 import { syntheticQuotes } from '../src/data.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion } from '../src/strategies.mjs';
@@ -16,6 +16,9 @@ const strategies = {
 for (const [name, strategy] of Object.entries(strategies)) {
   const config = { instrument, initialCash: '20000', feePerLot: '1', orderLatencyMs: '1', cancelLatencyMs: '2', maxQuoteAgeMs: '100',
     manifest: { datasetVersion: 'synthetic-xorshift32-v1', strategyArtifact: `example-${name}`, evaluationProtocol: 'fixture-only-no-performance-claim', seed: '41' } };
-  const report = runStrategy(config, quotes, strategy).report();
+  const report = runStrategy(
+    quoteInformationSource({ id: 'synthetic-information', instrument, ticks: quotes }),
+    new QuoteExecutionVenue({ id: 'synthetic-cash-venue', config, ticks: quotes, maxPositionLots: execution.quantity }),
+    strategy).report();
   console.log(json({ strategy: name, fills: report.fills.length, ledger: report.ledger, performance: report.performance }));
 }

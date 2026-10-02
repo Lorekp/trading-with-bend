@@ -1,7 +1,8 @@
+import { targetOrders } from '../src/target-orders.mjs';
+import { replayQuotes as runStrategy } from './replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BacktestError, MAX_NAT } from '../src/core.mjs';
-import { runStrategy } from '../src/framework.mjs';
 import { QUOTE_UNITS, parseQuoteCsv, syntheticQuotes, validateTicks } from '../src/data.mjs';
 import { targetPosition, buyAndHold, movingAverageCrossover, meanReversion } from '../src/strategies.mjs';
 
@@ -117,12 +118,12 @@ test('strategy warmup, invalid parameters, high fees and zero capital fail safel
   const strategy = targetPosition(() => { callbacks++; return '3'; }, { warmup: 4, maxPositionLots: '3' });
   const run = runStrategy(config(), ticks([100, 100, 100]), strategy);
   assert.equal(callbacks, 0); assert.equal(run.events.length, 3);
-  assert.throws(() => buyAndHold({ quantity: '3', feePerLot: '1' }), errorCode('STRATEGY_PARAMETER'));
+  assert.equal(buyAndHold({ quantity: '3' })({ history: ticks([100]) }), '3');
   assert.throws(() => movingAverageCrossover({ fast: 3, slow: 3, quantity: '1' }), errorCode('STRATEGY_PARAMETER'));
   assert.throws(() => meanReversion({ entryBps: '100', exitBps: '100', quantity: '1' }), errorCode('STRATEGY_PARAMETER'));
-  assert.throws(() => targetPosition(() => 1, { maxPositionLots: '1' })({ config: config(), history: ticks([100]), ledger: { cash: 1000n, quantity: 0n }, orders: [] }), errorCode('INVALID_INTEGER'));
-  assert.deepEqual(targetPosition('1', { maxPositionLots: '1' })({ config: config(), history: ticks([100]), ledger: { cash: 0n, quantity: 0n }, orders: [] }), []);
-  assert.deepEqual(targetPosition('0', { maxPositionLots: '1' })({ config: config({ feePerLot: '100' }), history: ticks([100]), ledger: { cash: 0n, quantity: 1n }, orders: [] }), []);
+  assert.throws(() => targetPosition(() => 1, { maxPositionLots: '1' })({ history: ticks([100]), ledger: { cash: 1000n, quantity: 0n }, orders: [] }), errorCode('INVALID_INTEGER'));
+  assert.deepEqual(targetOrders('1', { feePerLot: '1', maxPositionLots: '1' })({ history: ticks([100]), ledger: { cash: 0n, quantity: 0n }, orders: [] }), []);
+  assert.deepEqual(targetOrders('0', { feePerLot: '100', maxPositionLots: '1' })({ history: ticks([100]), ledger: { cash: 0n, quantity: 1n }, orders: [] }), []);
 });
 test('moving average and mean reversion trade using actual Bend accounting and executable quotes', () => {
   const scenarios = [

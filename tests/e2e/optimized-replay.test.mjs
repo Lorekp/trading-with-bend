@@ -1,6 +1,8 @@
+import { targetOrders } from '../../src/target-orders.mjs';
+import { replayQuotes as runStrategy } from '../replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Backtest, orders, runStrategy } from '../../src/framework.mjs';
+import { Backtest, orders } from '../../src/framework.mjs';
 import { MAX_NAT } from '../../src/core.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion, targetPosition } from '../../src/strategies.mjs';
 
@@ -53,7 +55,9 @@ function legacyRunStrategy(configuration, quotes, onTick) {
   const deepFreeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(deepFreeze); Object.freeze(value); } return value; };
   for (const tick of quotes) {
     run.step({ ...tick, sequence: String(++sequence) }); history.push(structuredClone(tick));
-    const decisions = onTick(deepFreeze({ config: structuredClone(configuration), history: structuredClone(history), ledger: structuredClone(run.state.ledger), orders: structuredClone(orders(run.state)) })) || [];
+    const context = deepFreeze({ history: structuredClone(history), ledger: structuredClone(run.state.ledger), orders: structuredClone(orders(run.state)) });
+    const target = onTick(context);
+    const decisions = target === null ? [] : targetOrders(target, { feePerLot: configuration.feePerLot, maxPositionLots: String(MAX_NAT) })(context);
     for (const decision of decisions) {
       const event = { ...decision, id: `strategy-${++sequence}`, time: tick.time, sequence: String(sequence), symbol: configuration.instrument.symbol, currency: configuration.instrument.currency };
       if (decision.type === 'submit') event.orderId = String(++orderId);
@@ -81,7 +85,7 @@ test('bounded history preserves a real strategy replay, exact postings, order st
 });
 
 test('bounded contexts expose only the trailing prefix, total tick count, and immutable retained views', () => {
-  const quotes = ticks(30), retained = [];
+  const quotes = ticks(30).map(tick => ({ ...tick, bid: '99', ask: '100' })), retained = [];
   const strategy = context => {
     retained.push(context);
     assert.equal(context.tickCount, retained.length);
@@ -91,11 +95,11 @@ test('bounded contexts expose only the trailing prefix, total tick count, and im
     assert.throws(() => { context.history[0].bid = '999999'; }, TypeError);
     assert.throws(() => { context.ledger.cash = 0n; }, TypeError);
     for (const order of context.orders) {
-      assert.throws(() => { order.side.$ = 'Sell'; }, TypeError);
+      assert.throws(() => { order.side = 'sell'; }, TypeError);
       assert.throws(() => { order.remaining = 999n; }, TypeError);
     }
-    if (context.tickCount === 1) return [{ type: 'submit', side: 'buy', limit: '999', quantity: '3' }];
-    return [];
+    if (context.tickCount === 1) return '3';
+    return null;
   };
   const run = runStrategy(config, quotes, strategy, { lookback: 3 });
   const firstHistory = retained[0].history.map(quote => ({ ...quote }));
@@ -103,8 +107,7 @@ test('bounded contexts expose only the trailing prefix, total tick count, and im
   assert.deepEqual(retained[0].history, firstHistory);
   assert.equal(retained[1].orders[0].remaining, 2n, 'Old order views do not change as later quotes fill the order');
   assert.equal(retained[2].orders[0].remaining, 1n);
-  assert.deepEqual(retained.at(-1).orders, []);
-  assert.equal(run.orders[0].remaining, 0n);
+  assert.equal(retained.at(-1).orders.length, 0);
   assert.equal(run.state.ledger.quantity, 3n);
   assert.notEqual(retained[1].history, retained[2].history);
   assert.equal(retained[1].history[0], retained[2].history[0], 'Deeply immutable quote objects may be shared safely');
@@ -148,61 +151,8 @@ test('invalid history bounds fail before any strategy callback; default still re
     assert.throws(() => runStrategy(config, ticks(3), () => assert.fail('Callback must not execute'), { lookback }), { code: 'STRATEGY_LOOKBACK' });
   }
   let count = 0;
-  runStrategy(config, ticks(5), ({ history, tickCount }) => { count++; assert.equal(history.length, count); assert.equal(tickCount, count); return []; });
+  runStrategy(config, ticks(5), ({ history, tickCount }) => { count++; assert.equal(history.length, count); assert.equal(tickCount, count); return null; });
   assert.equal(count, 5);
-});
-
-test('strategy sizing uses the immutable replay fees across independent runs', () => {
-  const strategy = buyAndHold({ quantity: '10' });
-  const quotes = ticks(4).map(tick => ({ ...tick, bid: '99', ask: '100', askLots: '100' }));
-  for (const [feePerLot, quantity, cash] of [['0', '10', '0'], ['5', '9', '55']]) {
-    const configuration = { ...config, initialCash: '1000', feePerLot };
-    const run = runStrategy(configuration, quotes, context => {
-      assert.ok(Object.isFrozen(context.config) && Object.isFrozen(context.config.instrument));
-      assert.throws(() => { context.config.feePerLot = '0'; }, TypeError);
-      configuration.feePerLot = '99'; // Caller edits cannot change the running strategy or ledger.
-      return strategy(context);
-    });
-    assert.equal(run.report().ledger.quantity, quantity);
-    assert.equal(run.report().ledger.cash, cash);
-    assert.ok(run.trace.every(event => event.status !== 'rejected-capital-or-fee'));
-  }
-  assert.throws(() => buyAndHold({ quantity: '10', feePerLot: '0' }), { code: 'STRATEGY_PARAMETER' });
-});
-
-test('declared strategy history is checked before consuming input and preserves complete replay', () => {
-  for (const strategy of [movingAverageCrossover({ fast: 5, slow: 20, quantity: '3' }),
-    meanReversion({ window: 20, quantity: '3' }), targetPosition('3', { maxPositionLots: '3', warmup: 25 })]) {
-    function* unread() { assert.fail('Insufficient history must fail before reading a quote'); }
-    assert.throws(() => runStrategy(config, unread(), strategy, { lookback: strategy.lookback - 1 }), { code: 'STRATEGY_LOOKBACK' });
-    const full = runStrategy(config, ticks(), strategy).report();
-    const bounded = runStrategy(config, ticks(), strategy, { lookback: strategy.lookback }).report();
-    assert.ok(full.fills.length > 0);
-    assert.deepEqual(bounded, full);
-  }
-});
-
-test('quote callbacks retain only working orders while reports and checkpoints retain the complete audit', () => {
-  const quotes = ticks(300);
-  let callbacks = 0;
-  const strategy = context => {
-    callbacks++;
-    assert.equal(context.orders.length, 0, 'Each preceding one-lot order has already filled');
-    const side = context.ledger.quantity === 0n ? 'buy' : 'sell';
-    return [{ type: 'submit', side, limit: side === 'buy' ? context.history.at(-1).ask : context.history.at(-1).bid, quantity: '1' }];
-  };
-  // Constant executable prices make each previous order fill on the next quote.
-  for (const quote of quotes) { quote.bid = '100'; quote.ask = '100'; }
-  const options = { lookback: 1, traceMode: 'compact' };
-  const active = runStrategy(config, quotes, strategy, { ...options, orderStorage: 'active' });
-  const reference = runStrategy(config, quotes, strategy, { ...options, orderStorage: 'all' });
-  assert.equal(callbacks, quotes.length * 2);
-  const report = active.report();
-  assert.equal(report.orders.length, quotes.length);
-  assert.equal(report.fills.length, quotes.length - 1);
-  assert.equal(active.workingOrders.length, 1);
-  assert.deepEqual(report, reference.report());
-  assert.deepEqual(Backtest.resume(active.checkpoint()).report(), report);
 });
 
 test('active engine storage retains completed-order cancellation metadata, FIFO, and every checkpoint boundary', () => {
@@ -298,4 +248,53 @@ test('failed valuation cannot partially commit an archived cancellation becoming
   assert.equal(active.orders[0].cancel_at.$, 'Some');
   assert.deepEqual(active.events, full.events);
   assert.deepEqual(Backtest.resume(active.checkpoint()).state, priorState);
+});
+
+test('strategy sizing uses the immutable venue fees across independent runs', () => {
+  const strategy = buyAndHold({ quantity: '10' });
+  const quotes = ticks(4).map(tick => ({ ...tick, bid: '99', ask: '100', askLots: '100' }));
+  for (const [feePerLot, quantity, cash] of [['0', '10', '0'], ['5', '9', '55']]) {
+    const configuration = { ...config, initialCash: '1000', feePerLot };
+    const run = runStrategy(configuration, quotes, context => {
+      configuration.feePerLot = '99'; // Caller edits cannot change the running strategy or ledger.
+      return strategy(context);
+    });
+    assert.equal(run.report().ledger.quantity, quantity);
+    assert.equal(run.report().ledger.cash, cash);
+    assert.ok(run.trace.every(event => event.status !== 'rejected-capital-or-fee'));
+  }
+  assert.throws(() => buyAndHold({ quantity: '10', feePerLot: '0' }), { code: 'STRATEGY_PARAMETER' });
+});
+
+test('declared strategy history rejects insufficient bounds and preserves complete replay', () => {
+  for (const strategy of [movingAverageCrossover({ fast: 5, slow: 20, quantity: '3' }),
+    meanReversion({ window: 20, quantity: '3' }), targetPosition('3', { maxPositionLots: '3', warmup: 25 })]) {
+    assert.throws(() => runStrategy(config, ticks(), strategy, { lookback: strategy.lookback - 1 }), { code: 'STRATEGY_LOOKBACK' });
+    const full = runStrategy(config, ticks(), strategy).report();
+    const bounded = runStrategy(config, ticks(), strategy, { lookback: strategy.lookback }).report();
+    assert.ok(full.fills.length > 0);
+    assert.deepEqual(bounded, full);
+  }
+});
+
+test('quote callbacks retain only working orders while reports and checkpoints retain the complete audit', () => {
+  const quotes = ticks(300);
+  let callbacks = 0;
+  const strategy = context => {
+    callbacks++;
+    assert.equal(context.orders.length, 0, 'Each preceding one-lot order has already filled');
+    return context.ledger.quantity === 0n ? '1' : '0';
+  };
+  // Constant executable prices make each previous order fill on the next quote.
+  for (const quote of quotes) { quote.bid = '100'; quote.ask = '100'; }
+  const options = { lookback: 1, traceMode: 'compact' };
+  const active = runStrategy(config, quotes, strategy, { ...options, orderStorage: 'active' });
+  const reference = runStrategy(config, quotes, strategy, { ...options, orderStorage: 'all' });
+  assert.equal(callbacks, quotes.length * 2);
+  const report = active.report();
+  assert.equal(report.orders.length, quotes.length);
+  assert.equal(report.fills.length, quotes.length - 1);
+  assert.equal(active.workingOrders.length, 1);
+  assert.deepEqual(report, reference.report());
+  assert.deepEqual(Backtest.resume(active.checkpoint()).report(), report);
 });

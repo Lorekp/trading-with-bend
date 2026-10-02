@@ -1,8 +1,9 @@
 # Shared research toolkit
 
 This toolkit supplies shared infrastructure for independent experiment agents.
-Rule strategies, ML predictions and externally generated orders use the same
-cash-spot execution/accounting model when they call `Backtest` or `runStrategy`.
+Rule strategies and ML predictions emit target positions through independently
+supplied information and execution adapters. The shipped execution venues and
+low-level `Backtest` use the Bend cash model. See [ADAPTERS.md](ADAPTERS.md).
 A queue worker can also call another simulator, but its results then have that
 simulator's verification boundary; the Bend proof claim does not transfer to it.
 
@@ -32,12 +33,14 @@ Intentional identity collisions fail rather than silently replacing old evidence
 
 | Module | Reusable tools |
 | --- | --- |
-| `src/core.mjs` | Pure integer validation, errors, hashing and JSON; no compiled runtime required |
+| `src/core.mjs` | Pure integer validation, immutable views, errors, hashing and JSON; no compiled runtime required |
 | `src/provenance.mjs` | Source snapshots shared by replay and experiment verification |
-| `src/framework.mjs` | Exact event replay, ledger, fills, checkpoints, frozen history callbacks |
+| `src/framework.mjs` | Exact event replay, ledger, fills and checkpoints |
+| `src/information-source.mjs`, `src/replay.mjs` | Information observations and independent source/venue composition |
+| `src/execution-venue.mjs`, `src/bar-execution-venue.mjs` | Venue-owned quote/bar execution, costs, liquidity and valuation |
 | `src/policies.mjs` | Bend-backed lot caps, data-role gates, label cutoff and deployment checks; exact affordable-lot division |
 | `src/data.mjs` | Strict quote CSV ingestion, explicit units, chronology checks, deterministic synthetic fixtures |
-| `src/strategies.mjs` | Target-position execution adapter, buy-and-hold, moving-average crossover, mean reversion |
+| `src/strategies.mjs` | Target-position signals, buy-and-hold, moving-average crossover, mean reversion |
 | `src/features.mjs` | Schema-bound trailing value/lag/mean/std/return features, batch/stream parity, warmup/missingness checks |
 | `src/models.mjs` | Training-only standardization, ridge/OLS baseline, model/feature lineage, checked predictions and regression metrics |
 | `src/evaluation.mjs` | Purged/embargoed walk-forward folds, persistent final-holdout release, regular return metrics, failure-preserving comparison |
@@ -118,22 +121,21 @@ clean up any subprocesses it launches.
 
 ## Rules and prediction-to-order execution
 
-`targetPosition(target, {maxPositionLots,warmup})` turns a target lot
-count into ordinary limit decisions. `target` is a decimal string or a callback
-of `{config,history,tickCount,ledger,orders}` returning one. It accounts for actual holdings and
-working orders, cancels stale/conflicting orders and waits for cancellation
-before replacement. It does not stack another order while one is working.
-In-flight orders may still execute during cancellation latency.
+`targetPosition(target, {maxPositionLots,warmup})` emits a target lot count or
+explicit `null`. `target` is a decimal string or a callback of the frozen strategy
+context. Built-in strategies require no venue fee configuration. `runStrategy`
+accepts an InformationSource and ExecutionVenue separately; callbacks cannot
+return submit/cancel orders.
 
-`buyAndHold`, `movingAverageCrossover` and `meanReversion` wrap this adapter.
-Fees come from the replay's immutable `context.config`; supplying `feePerLot`
-as a strategy option is rejected. `maxPositionLots` is mandatory on the
-target adapter and defaults to `quantity` for the built-ins. Changing a cap cannot
-undo already executed fills or guarantee liquidation; it controls new decisions.
-Future-timestamp fills remain prohibited by the engine's existing contract.
+The venue turns intent into feasible orders using its own prices, fees, liquidity,
+capital and position cap. It cancels stale/conflicting orders, waits for effective
+cancellation, and avoids stacking exposure. In-flight orders can still execute
+during cancellation latency. Changing a cap cannot undo executed fills or
+guarantee liquidation. Fee, funding, margin and PnL assumptions belong exclusively
+to the selected venue. Source prices and volume are used only for signals.
 
 Quote callbacks receive working orders only. Full order and fill audit records
-remain available on the returned backtest and in its reports and checkpoints.
+remain available on the venue's backtest and in its reports and checkpoints.
 Built-in quote strategies declare their minimum history as `strategy.lookback`.
 `runStrategy` rejects an explicit `lookback` smaller than that requirement before
 reading any quotes. Custom callbacks can declare the same property. Omitting

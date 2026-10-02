@@ -11,7 +11,8 @@ if (-not (Test-Path -LiteralPath "$taskDirectory/bin/lean")) {
   tar -xf $taskArchive -C .tools
   if ($LASTEXITCODE -ne 0) { throw 'Lean extraction failed' }
 }
-wsl -d Ubuntu-24.04 -- bash -c 'chmod +x .tools/lean-4.34.0-linux/bin/* && bash scripts/build-kernel.sh'
+$taskDistribution = if ($env:BEND_WSL_DISTRO) { $env:BEND_WSL_DISTRO } else { 'Ubuntu-24.04' }
+wsl -d $taskDistribution -- bash -c 'chmod +x .tools/lean-4.34.0-linux/bin/* && bash scripts/build-kernel.sh'
 if ($LASTEXITCODE -ne 0) { throw 'Kernel compilation failed' }
 node scripts/build.mjs --verdict
 if ($LASTEXITCODE -ne 0) { throw 'Bend kernel verification failed' }
