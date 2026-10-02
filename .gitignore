@@ -5,3 +5,5 @@ bend-reference.txt
 node_modules/
 data/
 *.tmp
+__pycache__/
+*.pyc

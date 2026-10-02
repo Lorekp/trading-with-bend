@@ -6,6 +6,12 @@ For parallel strategy agents and ML research, start with [the shared research gu
 
 For the downloaded ETHUSDT data, use [the ETH experiment guide](docs/ETH_EXPERIMENTS.md). `npm run eth-demo` runs six registered rule/ML scenarios over September's 43,200 minute candles, resampled into 8,640 completed five-minute bars. The source is **USD-M perpetual data with missing bookTicker**; these runs explicitly use a cash-only price proxy with assumed execution, not perpetual-futures accounting.
 
+For a small forecasting example, see [the optional ML guide](docs/FORECASTING.md).
+`npm run ml-demo` compares zero return, ridge, LightGBM and a PyTorch TCN using
+60 completed minutes to predict the next five-minute return. It reuses the
+research splits and registry, leaves final data unreleased, and requires the
+separate Python dependencies in `requirements-ml.txt`.
+
 The first implementation is deliberately one cash-only spot instrument, integer lots and ordinary limit orders. It implements the starting scope from the supplied specification. It is a reference simulator, not a claim about market realism or profitable strategies.
 
 ## Run it

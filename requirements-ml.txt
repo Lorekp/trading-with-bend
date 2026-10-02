@@ -1,0 +1,5 @@
+# Optional CPU research environment; Python 3.12 is the tested interpreter.
+numpy==2.2.6
+scikit-learn==1.7.2
+lightgbm==4.6.0
+torch==2.8.0

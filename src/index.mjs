@@ -5,9 +5,11 @@ export { enqueueExperiment, runQueue, listExperiments, recoverExperiment, readEx
 export { parameterGrid, gridJobs } from './search.mjs';
 export { walkForwardSplits, foldRows, withFinalHoldout, regularReturns, comparisonTable } from './evaluation.mjs';
 export { RollingFeatures, computeFeatures, featureSchema, validateFeatureArtifact } from './features.mjs';
-export { fitStandardScaler, transformFeatures, fitRidge, predictRidge, evaluateRegression, validateRidgeModel } from './models.mjs';
+export { fitStandardScaler, transformFeatures, fitRidge, predictRidge, evaluateRegression, validateRidgeModel, regressionMetrics } from './models.mjs';
 export { targetPosition, buyAndHold, movingAverageCrossover, meanReversion } from './strategies.mjs';
 export { QUOTE_UNITS, parseQuoteCsv, validateTicks, syntheticQuotes } from './data.mjs';
 export { loadBinanceBars, loadBinanceSeries } from './binance-bars.mjs';
 export { runBarStrategy, validateBars } from './bar-replay.mjs';
 export { createBarStrategy } from './bar-strategies.mjs';
+export { sequenceSamples } from './sequence-data.mjs';
+export { fitForecast, predictForecast, forecastRuntime } from './forecast.mjs';

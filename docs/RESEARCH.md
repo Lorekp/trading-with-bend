@@ -38,6 +38,7 @@ Intentional identity collisions fail rather than silently replacing old evidence
 | `src/strategies.mjs` | Target-position execution adapter, buy-and-hold, moving-average crossover, mean reversion |
 | `src/features.mjs` | Schema-bound trailing value/lag/mean/std/return features, batch/stream parity, warmup/missingness checks |
 | `src/models.mjs` | Training-only standardization, ridge/OLS baseline, model/feature lineage, checked predictions and regression metrics |
+| `src/sequence-data.mjs`, `src/forecast.mjs` | Regular sequence/label construction, optional Python model adapters, portable weights and checked return forecasts; see [FORECASTING.md](FORECASTING.md) |
 | `src/evaluation.mjs` | Purged/embargoed walk-forward folds, persistent final-holdout release, regular return metrics, failure-preserving comparison |
 | `src/search.mjs` | Bounded deterministic parameter grids, validation-only search jobs |
 | `src/experiments.mjs` | Immutable manifests, atomic job claims, parallel processes, timeouts, logs, explicit abandoned recovery |

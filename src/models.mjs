@@ -141,11 +141,18 @@ export function evaluateRegression({ model, rows, schema, fold, partition }) {
     requireThat(nat(row.feature.time, 'feature.time') >= nat(model.trainingCutoff, 'trainingCutoff'), 'EVALUATION_PARTITION', 'Evaluation observations must be at or after the exclusive training cutoff');
     return predictRidge({ model, feature: row.feature, schema, fold, decisionTime: row.decisionTime });
   });
-  const errors = predictions.map((prediction, i) => finite(prediction.prediction - rows[i].target, 'prediction error'));
+  const metrics = regressionMetrics(predictions.map(prediction => prediction.prediction), rows.map(row => row.target));
+  return seal({ format: 'regression-evaluation-v1', modelHash: model.hash, fold, partition, rowCount: rows.length, ...metrics,
+    evaluationDataHash: hash(rows.map(row => ({ id: row.id, featureHash: row.feature.hash, target: row.target, labelAvailableAt: row.labelAvailableAt, decisionTime: row.decisionTime }))), predictions });
+}
+
+/** Numerical forecast errors only; callers enforce partition and model lineage. */
+export function regressionMetrics(predictions, targets) {
+  requireThat(Array.isArray(predictions) && predictions.length > 0 && Array.isArray(targets) && predictions.length === targets.length, 'EVALUATION_DATA', 'Nonempty aligned predictions and targets required');
+  const errors = predictions.map((prediction, i) => finite(finite(prediction, 'prediction') - finite(targets[i], 'target'), 'prediction error'));
   const rmse = rootMeanSquare(errors), squared = rmse * rmse;
   const mseUnavailableReason = !Number.isFinite(squared) ? 'overflow' : squared === 0 && rmse !== 0 ? 'underflow' : null;
   const mse = mseUnavailableReason === null ? squared : null;
   const mae = stableMean(errors.map(Math.abs));
-  return seal({ format: 'regression-evaluation-v1', modelHash: model.hash, fold, partition, rowCount: rows.length, mse, mseUnavailableReason, rmse, mae,
-    evaluationDataHash: hash(rows.map(row => ({ id: row.id, featureHash: row.feature.hash, target: row.target, labelAvailableAt: row.labelAvailableAt, decisionTime: row.decisionTime }))), predictions });
+  return { mse, mseUnavailableReason, rmse, mae };
 }
