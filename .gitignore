@@ -1,0 +1,7 @@
+.tools/
+build/
+output/
+bend-reference.txt
+node_modules/
+data/
+*.tmp

@@ -1,0 +1,17 @@
+{
+  "name": "trading-with-bend",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --test tests/*.test.mjs",
+    "proof": "node scripts/build.mjs --verdict",
+    "demo": "node scripts/build.mjs && node src/cli.mjs examples/demo.json",
+    "backtest": "node src/cli.mjs",
+    "experiments": "node src/experiments-cli.mjs",
+    "strategies-demo": "node scripts/build.mjs && node examples/strategies.mjs",
+    "research-demo": "node scripts/build.mjs && node examples/parallel-research.mjs"
+  }
+}

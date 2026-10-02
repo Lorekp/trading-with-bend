@@ -1,0 +1,23 @@
+$ErrorActionPreference = 'Stop'
+Set-Location (Split-Path -Parent $PSScriptRoot)
+$taskPin = Get-Content -LiteralPath 'toolchain.json' -Raw | ConvertFrom-Json
+New-Item -ItemType Directory -Force -Path '.tools' | Out-Null
+if (-not (Test-Path -LiteralPath '.tools/bend')) {
+  git clone --no-checkout $taskPin.bendRepository .tools/bend
+  if ($LASTEXITCODE -ne 0) { throw 'Compiler download failed' }
+  git -C .tools/bend checkout --detach $taskPin.bendRevision
+  if ($LASTEXITCODE -ne 0) { throw 'Pinned checkout failed' }
+}
+$taskRevision = git -C .tools/bend rev-parse HEAD
+if ($taskRevision -ne $taskPin.bendRevision) { throw 'Existing compiler has a different revision; preserve it and resolve manually' }
+if (-not (Test-Path -LiteralPath '.tools/bun-linux-x64/bun')) {
+  $taskUrl = "https://github.com/oven-sh/bun/releases/download/bun-v$($taskPin.bunVersion)/bun-linux-x64.zip"
+  Invoke-WebRequest -Uri $taskUrl -OutFile '.tools/bun-linux.zip'
+  $taskHash = (Get-FileHash -LiteralPath '.tools/bun-linux.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($taskHash -ne $taskPin.bunLinuxX64ZipSha256) { throw 'Bun archive checksum mismatch' }
+  Expand-Archive -LiteralPath '.tools/bun-linux.zip' -DestinationPath '.tools'
+}
+wsl -d Ubuntu-24.04 -- chmod +x .tools/bun-linux-x64/bun
+if ($LASTEXITCODE -ne 0) { throw 'Ubuntu-24.04 WSL is required. See README.md.' }
+node scripts/build.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Build failed' }

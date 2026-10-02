@@ -1,0 +1,17 @@
+{
+  "config": {
+    "instrument": { "symbol": "DEMO", "currency": "EUR", "lotSize": "1", "priceTick": "1" },
+    "initialCash": "100000", "feePerLot": "10", "orderLatencyMs": "1", "cancelLatencyMs": "2", "maxQuoteAgeMs": "100",
+    "manifest": { "datasetVersion": "synthetic-demo-v1", "strategyArtifact": "scripted-roundtrip-v1", "evaluationProtocol": "demonstration-only", "seed": "none" }
+  },
+  "events": [
+    { "id": "buy-1", "type": "submit", "time": "0", "sequence": "1", "symbol": "DEMO", "currency": "EUR", "orderId": "1", "side": "buy", "limit": "10000", "quantity": "2" },
+    { "id": "quote-1", "type": "tick", "time": "1", "sourceTime": "1", "sequence": "2", "symbol": "DEMO", "currency": "EUR", "bid": "9900", "ask": "10000", "bidLots": "4", "askLots": "1" },
+    { "id": "quote-2", "type": "tick", "time": "2", "sourceTime": "2", "sequence": "3", "symbol": "DEMO", "currency": "EUR", "bid": "9850", "ask": "9950", "bidLots": "4", "askLots": "2" },
+    { "id": "sell-1", "type": "submit", "time": "3", "sequence": "4", "symbol": "DEMO", "currency": "EUR", "orderId": "2", "side": "sell", "limit": "10100", "quantity": "2" },
+    { "id": "quote-3", "type": "tick", "time": "4", "sourceTime": "4", "sequence": "5", "symbol": "DEMO", "currency": "EUR", "bid": "10100", "ask": "10200", "bidLots": "1", "askLots": "5" },
+    { "id": "cancel-1", "type": "cancel", "time": "5", "sequence": "6", "symbol": "DEMO", "currency": "EUR", "orderId": "2" },
+    { "id": "quote-4", "type": "tick", "time": "6", "sourceTime": "6", "sequence": "7", "symbol": "DEMO", "currency": "EUR", "bid": "10150", "ask": "10200", "bidLots": "1", "askLots": "5" },
+    { "id": "end", "type": "clock", "time": "7", "sequence": "8", "symbol": "DEMO", "currency": "EUR" }
+  ]
+}
