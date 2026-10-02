@@ -2,7 +2,7 @@ import { performance } from 'node:perf_hooks';
 import { loadBinanceBars } from '../../src/binance-bars.mjs';
 import { createBarStrategy } from '../../src/bar-strategies.mjs';
 import { runBarStrategy } from '../../src/bar-replay.mjs';
-import { hash } from '../../src/framework.mjs';
+import { hash } from '../../src/core.mjs';
 
 export default async function ethExperiment(configuration, context) {
   const started = performance.now();

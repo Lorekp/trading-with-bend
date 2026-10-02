@@ -32,6 +32,8 @@ Intentional identity collisions fail rather than silently replacing old evidence
 
 | Module | Reusable tools |
 | --- | --- |
+| `src/core.mjs` | Pure integer validation, errors, hashing and JSON; no compiled runtime required |
+| `src/provenance.mjs` | Source snapshots shared by replay and experiment verification |
 | `src/framework.mjs` | Exact event replay, ledger, fills, checkpoints, frozen history callbacks |
 | `src/policies.mjs` | Bend-backed lot caps, data-role gates, label cutoff and deployment checks; exact affordable-lot division |
 | `src/data.mjs` | Strict quote CSV ingestion, explicit units, chronology checks, deterministic synthetic fixtures |
@@ -110,18 +112,33 @@ clean up any subprocesses it launches.
 
 ## Rules and prediction-to-order execution
 
-`targetPosition(target, {feePerLot,maxPositionLots,warmup})` turns a target lot
+`targetPosition(target, {maxPositionLots,warmup})` turns a target lot
 count into ordinary limit decisions. `target` is a decimal string or a callback
-of `{history,ledger,orders}` returning one. It accounts for actual holdings and
+of `{config,history,tickCount,ledger,orders}` returning one. It accounts for actual holdings and
 working orders, cancels stale/conflicting orders and waits for cancellation
 before replacement. It does not stack another order while one is working.
 In-flight orders may still execute during cancellation latency.
 
 `buyAndHold`, `movingAverageCrossover` and `meanReversion` wrap this adapter.
-Use `feePerLot` matching the engine config. `maxPositionLots` is mandatory on the
+Fees come from the replay's immutable `context.config`; supplying `feePerLot`
+as a strategy option is rejected. `maxPositionLots` is mandatory on the
 target adapter and defaults to `quantity` for the built-ins. Changing a cap cannot
 undo already executed fills or guarantee liquidation; it controls new decisions.
 Future-timestamp fills remain prohibited by the engine's existing contract.
+
+Quote callbacks receive working orders only. Full order and fill audit records
+remain available on the returned backtest and in its reports and checkpoints.
+Built-in quote strategies declare their minimum history as `strategy.lookback`.
+`runStrategy` rejects an explicit `lookback` smaller than that requirement before
+reading any quotes. Custom callbacks can declare the same property. Omitting
+the replay's `lookback` preserves complete history; use `tickCount` for elapsed
+observations when requesting bounded history.
+
+For build-independent data preparation, import `data.mjs`, `features.mjs`,
+`numerics.mjs`, `search.mjs` or `core.mjs` directly. Registry inspection also
+works without a build; enqueueing and executing experiments still require valid
+runtime evidence. `index.mjs` exports the complete toolkit, including Bend-backed
+modules, and requires a build.
 
 ## Data and features
 

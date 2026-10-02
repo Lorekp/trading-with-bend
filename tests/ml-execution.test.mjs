@@ -17,7 +17,7 @@ test('a trained model target produces causal executable fills through the shared
     const time = history.at(-1).time, feature = observed.find(row => row.time === time);
     const prediction = predictRidge({ model, feature, schema, fold: model.fold, decisionTime: time });
     return prediction.prediction > 0 ? '2' : '0';
-  }, { feePerLot: '1', maxPositionLots: '2' });
+  }, { maxPositionLots: '2' });
   const config = { instrument, initialCash: '1000', feePerLot: '1', orderLatencyMs: '0', cancelLatencyMs: '0', maxQuoteAgeMs: '10', manifest: { datasetVersion: 'analytic-ml-execution', strategyArtifact: model.hash, evaluationProtocol: 'independent-test', seed: 'none' } };
   const report = runStrategy(config, ticks, strategy).report();
   assert.equal(report.fills.length, 1); assert.equal(report.fills[0].decisionTime, '5'); assert.equal(report.fills[0].executionTime, '6');

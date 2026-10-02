@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fork, spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
-import { runtimeProvenance } from './framework.mjs';
+import { runtimeProvenance } from './provenance.mjs';
 
 export class ExperimentError extends Error {
   constructor(code, message) { super(message); this.name = 'ExperimentError'; this.code = code; }

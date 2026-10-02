@@ -3,7 +3,7 @@ import { open, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createInflateRaw } from 'node:zlib';
 import { archiveAccepted, checkArchiveBuild } from './archive.mjs';
-import { hash, MAX_NAT, nat, requireThat } from './framework.mjs';
+import { hash, MAX_NAT, nat, requireThat } from './core.mjs';
 
 const MINUTE = 60_000n;
 const KLINE_HEADER = 'open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore';

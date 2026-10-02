@@ -1,4 +1,4 @@
-import { hash, nat, requireThat } from './framework.mjs';
+import { hash, nat, requireThat } from './core.mjs';
 import { populationMoments, stableMean } from './numerics.mjs';
 
 const finite = (value, name) => {

@@ -1,36 +1,12 @@
-import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import Engine from '../build/engine.mjs';
+import { BacktestError, canonical, checked, hash, json, nat, requireThat } from './core.mjs';
+import { runtimeProvenance, sourceManifest } from './provenance.mjs';
 
 // Only values recursively frozen here may bypass future recursive traversal.
 // Object.isFrozen alone is insufficient: callers can shallow-freeze containers.
 const DEEP_FROZEN = new WeakSet();
 
-export const MAX_NAT = (1n << 48n) - 1n;
-export class BacktestError extends Error {
-  constructor(code, message) { super(message); this.name = 'BacktestError'; this.code = code; }
-}
-export function requireThat(ok, code, message) {
-  if (!ok) throw new BacktestError(code, message);
-}
-export function nat(value, name, positive = false) {
-  requireThat(typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value), 'INVALID_INTEGER', `${name} must be a canonical decimal string`);
-  const n = BigInt(value);
-  requireThat(n <= MAX_NAT && (!positive || n > 0n), 'INTEGER_RANGE', `${name} outside ${positive ? 1 : 0}..2^48-1`);
-  return n;
-}
-export function checked(n, name) {
-  requireThat(n >= 0n && n <= MAX_NAT, 'ARITHMETIC_RANGE', `${name} outside 0..2^48-1`);
-  return n;
-}
-export const json = value => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
-export function canonical(value) {
-  if (typeof value === 'bigint') return JSON.stringify(value.toString());
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
-  return JSON.stringify(value);
-}
-export const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonical(value)).digest('hex');
 const text = (s, name) => requireThat(typeof s === 'string' && s.length > 0, 'MISSING_FIELD', `${name} is required`);
 function keys(object, allowed, name) {
   requireThat(object && typeof object === 'object' && !Array.isArray(object), 'INVALID_OBJECT', `${name} must be an object`);
@@ -96,15 +72,7 @@ function sameOrder(left, right) {
     left.decision === right.decision && left.arrival === right.arrival && left.cancel_at.$ === right.cancel_at.$ && left.cancel_at.value === right.cancel_at.value;
 }
 function orderList(values) { return values.reduceRight((tail, head) => ({ $: 'Con', head, tail }), { $: 'Nil' }); }
-function sourceManifest() {
-  const paths = ['LAWS.bend', 'PROOF.bend', 'scripts/build.mjs', 'build/engine.mjs', 'build/policy.mjs', 'build/archive.mjs', 'toolchain.json', 'package.json',
-    ...readdirSync(new URL('../src/', import.meta.url)).filter(name => name.endsWith('.mjs')).map(name => `src/${name}`),
-    ...readdirSync(new URL('../bend/', import.meta.url)).filter(name => name.endsWith('.bend')).map(name => `bend/${name}`)].sort();
-  return Object.fromEntries(paths.map(path => [path, hash(readFileSync(new URL(`../${path}`, import.meta.url), 'utf8'))]));
-}
-// Bind provenance to the implementation loaded by this process, not later disk edits.
-const LOADED_SOURCES = freeze(sourceManifest());
-export function runtimeProvenance() { return structuredClone(LOADED_SOURCES); }
+const LOADED_SOURCES = freeze(runtimeProvenance());
 export class Backtest {
   #sources;
   #verification;
@@ -340,15 +308,20 @@ function freeze(value) {
 // for replay/checkpoints. tickCount always counts all consumed market ticks.
 export function runStrategy(config, ticks, onTick, options = {}) {
   keys(options, ['lookback', 'traceMode', 'orderStorage'], 'strategy options');
+  requireThat(typeof onTick === 'function', 'STRATEGY_INPUT', 'Expected a strategy callback');
+  const requiredLookback = onTick.lookback;
+  requireThat(requiredLookback === undefined || Number.isSafeInteger(requiredLookback) && requiredLookback > 0, 'STRATEGY_LOOKBACK', 'Strategy lookback must be a positive safe integer');
   const lookback = options.lookback;
   requireThat(lookback === undefined || Number.isSafeInteger(lookback) && lookback > 0, 'STRATEGY_LOOKBACK', 'lookback must be a positive safe integer');
+  requireThat(lookback === undefined || requiredLookback === undefined || lookback >= requiredLookback, 'STRATEGY_LOOKBACK', 'lookback must cover the strategy history requirement');
   const run = new Backtest(config, { ...(options.traceMode === undefined ? {} : { traceMode: options.traceMode }), ...(options.orderStorage === undefined ? {} : { orderStorage: options.orderStorage }) }), history = [];
+  config = run.config;
   let sequence = 0n, orderId = 0n, tickCount = 0;
   for (const tick of ticks) {
     requireThat(tick.type === 'tick', 'STRATEGY_INPUT', 'runStrategy accepts ticks only');
     run.step({ ...tick, sequence: String(++sequence) }); history.push(freeze(structuredClone(tick))); tickCount++;
     if (lookback !== undefined && history.length > lookback) history.shift();
-    const decisions = onTick(freeze({ history: history.slice(), tickCount, ledger: run.ledger, orders: run.orders })) || [];
+    const decisions = onTick(freeze({ config, history: history.slice(), tickCount, ledger: run.ledger, orders: run.workingOrders })) || [];
     requireThat(Array.isArray(decisions), 'STRATEGY_OUTPUT', 'Strategy must return an array of submit/cancel decisions');
     for (const decision of decisions) {
       requireThat(['submit', 'cancel'].includes(decision.type), 'STRATEGY_OUTPUT', 'Only submit/cancel decisions are supported');

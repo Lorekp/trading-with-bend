@@ -4,7 +4,8 @@ import { computeFeatures } from '../src/features.mjs';
 import { fitRidge, predictRidge, evaluateRegression } from '../src/models.mjs';
 import { walkForwardSplits, foldRows } from '../src/evaluation.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion, targetPosition } from '../src/strategies.mjs';
-import { runStrategy, hash } from '../src/framework.mjs';
+import { runStrategy } from '../src/framework.mjs';
+import { hash } from '../src/core.mjs';
 
 export default async function experiment(configuration, context) {
   const { kind, datasetSeed = '41', parameters = {}, evaluationPartition } = configuration;
@@ -23,7 +24,7 @@ export default async function experiment(configuration, context) {
   const validation = foldRows(samples, plan, fold.id, 'select', 'validation');
   const wantedTimes = new Set(validation.map(row => row.time));
   const evaluationTicks = ticks.filter(t => wantedTimes.has(t.time));
-  const execution = { quantity: '10', feePerLot: '1' };
+  const execution = { quantity: '10' };
   let strategy, regression = null, model = null;
   if (kind === 'hold') strategy = buyAndHold(execution);
   else if (kind === 'crossover') strategy = movingAverageCrossover({ ...execution, fast: parameters.fast ?? 3, slow: parameters.slow ?? 10 });
@@ -37,7 +38,7 @@ export default async function experiment(configuration, context) {
       const time = history.at(-1).time;
       const p = predictRidge({ model, feature: byTime.get(time), schema, fold: fold.id, decisionTime: time });
       return p.prediction > (parameters.threshold ?? 0) ? execution.quantity : '0';
-    }, { feePerLot: execution.feePerLot, maxPositionLots: execution.quantity });
+    }, { maxPositionLots: execution.quantity });
     regression = evaluateRegression({ model, rows: validation.map(row => ({ ...row, partition: 'validation', decisionTime: row.time })), schema, fold: fold.id, partition: 'validation' });
     context.writeArtifact('model.json', model);
     context.writeArtifact('regression.json', regression);

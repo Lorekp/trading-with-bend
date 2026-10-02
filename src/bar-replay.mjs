@@ -1,4 +1,5 @@
-import { Backtest, nat, checked, requireThat, hash } from './framework.mjs';
+import { Backtest } from './framework.mjs';
+import { nat, checked, requireThat, hash } from './core.mjs';
 import { barExecutionAllowed, cappedLots } from './policies.mjs';
 import { targetPosition } from './strategies.mjs';
 
@@ -56,7 +57,7 @@ export function runBarStrategy(config, input, strategy, options = {}) {
   const backtest = new Backtest(config, { traceMode, orderStorage }), evidence = [], targets = [];
   config = backtest.config;
   let sequence = 0n, orderId = 0n, desired = '0';
-  const reconcile = targetPosition(() => desired, { feePerLot: config.feePerLot, maxPositionLots });
+  const reconcile = targetPosition(() => desired, { maxPositionLots });
   const base = (id, time) => ({ id, time: String(time), sequence: String(++sequence), symbol: config.instrument.symbol, currency: config.instrument.currency });
   for (let index = 0; index < bars.length; index++) {
     const bar = bars[index], previous = bars[index - 1], executionTime = checked(BigInt(bar.openTime) + delay, 'bar execution time');
@@ -82,7 +83,7 @@ export function runBarStrategy(config, input, strategy, options = {}) {
     // decisions, infer an intrabar stop ordering, or invent an exit transaction.
     if (index === bars.length - 1 || target === null) continue;
     const limitQuote = { ...closeEvent, ...spread(BigInt(bar.close), collar, tickSize) };
-    const decisions = reconcile({ history: [limitQuote], ledger: backtest.ledger, orders: currentOrders });
+    const decisions = reconcile({ config, history: [limitQuote], ledger: backtest.ledger, orders: currentOrders });
     for (const decision of decisions) {
       const event = { ...decision, ...base(`bar-decision-${++orderId}`, bar.availableAt) };
       if (decision.type === 'submit') event.orderId = String(orderId);

@@ -4,7 +4,8 @@ import { readFileSync, mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Engine from '../build/engine.mjs';
-import { Backtest, BacktestError, MAX_NAT, orders, runStrategy, hash, json } from '../src/framework.mjs';
+import { Backtest, orders, runStrategy } from '../src/framework.mjs';
+import { BacktestError, MAX_NAT, hash, json } from '../src/core.mjs';
 import { validateModelArtifact, EvaluationSession, runExperiment } from '../src/research.mjs';
 
 const demo = JSON.parse(readFileSync(new URL('../examples/demo.json', import.meta.url), 'utf8'));

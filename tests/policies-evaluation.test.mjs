@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { cappedLots, affordableLots, trainingAllowed, canReadPartition, modelReady } from '../src/policies.mjs';
 import { walkForwardSplits, foldRows, withFinalHoldout, regularReturns, comparisonTable } from '../src/evaluation.mjs';
-import { Backtest, hash, MAX_NAT } from '../src/framework.mjs';
+import { Backtest } from '../src/framework.mjs';
+import { hash, MAX_NAT } from '../src/core.mjs';
 
 const samples = Array.from({ length: 16 }, (_, i) => ({ id: `s${i}`, time: String(10 * i), labelAvailableAt: String(10 * i + 15), value: i }));
 const options = { trainSize: 5, validationSize: 2, finalStart: 13, embargoMs: '5' };

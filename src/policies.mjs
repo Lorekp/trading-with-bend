@@ -1,5 +1,5 @@
 import Policy from '../build/policy.mjs';
-import { nat, requireThat } from './framework.mjs';
+import { nat, requireThat } from './core.mjs';
 
 const roles = { train: 'Train', select: 'Select', final: 'Final' };
 const partitions = { train: 'Training', validation: 'Validation', final: 'Holdout' };

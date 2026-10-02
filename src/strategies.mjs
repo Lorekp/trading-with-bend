@@ -1,4 +1,4 @@
-import { nat, requireThat } from './framework.mjs';
+import { nat, requireThat } from './core.mjs';
 import { affordableLots, cappedLots } from './policies.mjs';
 
 const windowSize = (value, name) => requireThat(Number.isSafeInteger(value) && value > 0, 'STRATEGY_PARAMETER', `${name} must be a positive integer`);
@@ -9,13 +9,15 @@ const sum = values => values.reduce((total, value) => total + value, 0n);
 // A stateless execution adapter suitable for rules or model-generated targets.
 // Reuse with multiple runs is safe. A decision is based only on its supplied
 // history prefix; external information captured by a user callback is not sandboxed.
-export function targetPosition(target, { feePerLot, maxPositionLots, warmup = 1 } = {}) {
-  nat(feePerLot, 'feePerLot'); nat(maxPositionLots, 'maxPositionLots'); windowSize(warmup, 'warmup');
+export function targetPosition(target, { maxPositionLots, warmup = 1, ...unknown } = {}) {
+  requireThat(Object.keys(unknown).length === 0, 'STRATEGY_PARAMETER', 'Only maxPositionLots and warmup are strategy execution options; fees come from the replay config');
+  nat(maxPositionLots, 'maxPositionLots'); windowSize(warmup, 'warmup');
   requireThat(typeof target === 'function' || typeof target === 'string', 'STRATEGY_PARAMETER', 'target must be a canonical lot string or callback returning one');
   if (typeof target === 'string') nat(target, 'target');
-  const fee = BigInt(feePerLot), cap = BigInt(maxPositionLots);
-  return context => {
+  const cap = BigInt(maxPositionLots);
+  const onTick = context => {
     requireThat(context && Array.isArray(context.history) && Array.isArray(context.orders), 'STRATEGY_CONTEXT', 'Expected history, ledger and orders from runStrategy');
+    const feePerLot = context.config?.feePerLot, fee = nat(feePerLot, 'config.feePerLot');
     if (context.history.length < warmup) return [];
     const requested = typeof target === 'function' ? target(context) : target;
     if (requested === null || requested === undefined) return [];
@@ -48,6 +50,7 @@ export function targetPosition(target, { feePerLot, maxPositionLots, warmup = 1 
     const quantity = cappedLots(String(distance), budget, String(headroom));
     return quantity === '0' ? [] : [{ type: 'submit', side, limit: String(limit), quantity }];
   };
+  return Object.freeze(Object.assign(onTick, { lookback: warmup }));
 }
 
 export function buyAndHold({ quantity, maxPositionLots = quantity, ...execution } = {}) {

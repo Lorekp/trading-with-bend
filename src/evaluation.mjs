@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hash, json, nat, requireThat } from './framework.mjs';
+import { hash, json, nat, requireThat } from './core.mjs';
 import { trainingAllowed, canReadPartition } from './policies.mjs';
 
 const frozenCopy = value => {

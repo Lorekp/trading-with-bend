@@ -83,7 +83,7 @@ const { result } = runExperiment('output/experiments', input.config, () => {
   return Backtest.resume(saved).run(input.events.slice(3)).report();
 });
 
-// Every callback sees only a frozen history prefix and current ledger/orders.
+// Every callback sees frozen configuration, history, ledger and working orders.
 const simulated = runStrategy(input.config, ticks, ({ history }) =>
   history.length === 1
     ? [{ type: 'submit', side: 'buy', quantity: '1', limit: history[0].ask }]

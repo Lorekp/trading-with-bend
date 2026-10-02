@@ -1,7 +1,8 @@
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Backtest, hash, json, requireThat } from './framework.mjs';
+import { Backtest } from './framework.mjs';
+import { hash, json, requireThat } from './core.mjs';
 import { runExperiment } from './research.mjs';
 
 const args = process.argv.slice(2);

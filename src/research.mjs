@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
-import { hash, json, nat, requireThat } from './framework.mjs';
+import { hash, json, nat, requireThat } from './core.mjs';
 import { canReadPartition, modelReady } from './policies.mjs';
 
 export function validateModelArtifact(artifact, schema, decisionTime) {

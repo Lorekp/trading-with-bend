@@ -1,4 +1,4 @@
-import { checked, hash, nat, requireThat } from './framework.mjs';
+import { checked, hash, nat, requireThat } from './core.mjs';
 import { RollingFeatures } from './features.mjs';
 import { fitRidge, predictRidge } from './models.mjs';
 import { cappedLots } from './policies.mjs';

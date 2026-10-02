@@ -1,4 +1,6 @@
-export { Backtest, BacktestError, runStrategy, runtimeProvenance, hash, json, MAX_NAT } from './framework.mjs';
+export { Backtest, runStrategy } from './framework.mjs';
+export { BacktestError, hash, json, MAX_NAT } from './core.mjs';
+export { runtimeProvenance } from './provenance.mjs';
 export { cappedLots, affordableLots, trainingAllowed, modelReady, canReadPartition, barExecutionAllowed } from './policies.mjs';
 export { validateModelArtifact, EvaluationSession, runExperiment } from './research.mjs';
 export { enqueueExperiment, runQueue, listExperiments, recoverExperiment, readExperimentResult, verifyExperimentArtifacts, deterministicSeed } from './experiments.mjs';
