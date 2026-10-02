@@ -1,11 +1,28 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { canonical, freeze, hash, requireThat } from './core.mjs';
 
+function toolkitFiles(directory = 'src') {
+  return readdirSync(new URL(`../${directory}/`, import.meta.url), { withFileTypes: true }).flatMap(entry => {
+    const path = `${directory}/${entry.name}`;
+    if (entry.isDirectory()) return entry.name === '__pycache__' ? [] : toolkitFiles(path);
+    return entry.isFile() && /\.(mjs|py)$/.test(entry.name) ? [path] : [];
+  });
+}
+
 export function sourceManifest() {
   const paths = ['LAWS.bend', 'PROOF.bend', 'scripts/build.mjs', 'build/engine.mjs', 'build/policy.mjs', 'build/archive.mjs', 'toolchain.json', 'package.json',
-    ...readdirSync(new URL('../src/', import.meta.url)).filter(name => name.endsWith('.mjs')).map(name => `src/${name}`),
+    ...toolkitFiles(),
     ...readdirSync(new URL('../bend/', import.meta.url)).filter(name => name.endsWith('.bend')).map(name => `bend/${name}`)].sort();
   return Object.fromEntries(paths.map(path => [path, hash(readFileSync(new URL(`../${path}`, import.meta.url), 'utf8'))]));
+}
+
+// Event-sourced checkpoints depend on the checked Bend build and its replay host.
+// Reports and experiments retain the full toolkit identity above. Research/CLI
+// changes require a fresh process, but do not change replay compatibility.
+export function checkpointSources(sources) {
+  const host = ['src/core.mjs', 'src/framework.mjs', 'src/bend-runtime.mjs', 'src/provenance.mjs'];
+  return Object.fromEntries(Object.entries(sources).filter(([path]) =>
+    host.includes(path) || !path.startsWith('src/') && path !== 'package.json'));
 }
 
 // Pin evidence when toolkit modules load. Readers may inspect a registry without

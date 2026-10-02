@@ -79,8 +79,8 @@ log-return units. Zero predicts exactly no price change.
 For another study, put its worker under `experiments/<study>/`, obtain fitting
 rows with `foldRows(..., 'train', 'train')`, and selection rows with
 `foldRows(..., 'select', 'validation')`. Mark their `partition` explicitly. Pin
-`src/ml/forecast.py`, `requirements-ml.txt`, worker helpers and datasets in
-`dependencies`; the registry already pins top-level shared JavaScript modules.
+`requirements-ml.txt`, worker helpers and datasets in `dependencies`; the registry
+automatically pins shared JavaScript and Python modules recursively under `src`.
 Save the returned model and diagnostics using `context.writeArtifact`.
 
 ## Information and chronology
@@ -102,8 +102,9 @@ validation.
 The example uses the first 60% of labeled samples for the training region, a
 later validation region, and reserves the last 20% for final testing. The shared
 split module purges training labels reaching validation, including equality.
-Five samples immediately before final testing are unused so validation labels
-also end strictly before final observations. Input histories may overlap;
+The split module also purges validation labels reaching the first final
+observation, including equality. With this five-minute horizon it excludes five
+samples and records them in `validationPurged`. Input histories may overlap;
 historical context is allowed, future labels are not.
 
 Early stopping selects on validation labels. Consequently validation predictions

@@ -52,8 +52,12 @@ test('forecast sequences use completed minutes, exact future labels, and purged 
     altered.samples.filter(row => BigInt(row.labelAvailableAt) <= BigInt(bars[199].availableAt)));
   assert.throws(() => ethForecastData(bars.filter((_, i) => i !== 150)), { code: 'BAR_GAP' });
   assert.throws(() => ethForecastData([...bars.slice(0, 150), bars[149], ...bars.slice(150)]), { code: 'BAR_GAP' });
-  const plan = walkForwardSplits(samples, { trainSize: 100, validationSize: 30, finalStart: 150, stepSize: 200 });
+  const plan = walkForwardSplits(samples, { trainSize: 100, validationSize: 50, finalStart: 150, stepSize: 200 });
   assert.equal(plan.folds[0].purged.length, 5);
+  assert.equal(plan.folds[0].validationPurged.length, 5);
+  const validation = foldRows(samples, plan, 'fold-1', 'select', 'validation');
+  assert.equal(validation.length, 45);
+  assert.ok(validation.every(row => BigInt(row.labelAvailableAt) < BigInt(samples[plan.final[0]].time)));
   const train = foldRows(samples, plan, 'fold-1', 'train', 'train');
   assert.ok(train.every(row => BigInt(row.labelAvailableAt) < BigInt(plan.folds[0].validationStart)));
   assert.throws(() => foldRows(samples, plan, 'fold-1', 'train', 'final'), { code: 'PARTITION_DENIED' });
@@ -114,7 +118,7 @@ test('forecast adapters train, reload, gate availability, and register all trial
         'assert m(x).shape == (2,)', 'assert 24000 < sum(p.numel() for p in m.parameters()) < 25000',
       ].join('\n')], { encoding: 'utf8', timeout: 30000, windowsHide: true });
       assert.ifError(causal.error); assert.equal(causal.status, 0, causal.stderr);
-      const dependencies = ['experiments/eth-forecast/data.mjs', 'src/ml/forecast.py', 'requirements-ml.txt'];
+      const dependencies = ['experiments/eth-forecast/data.mjs', 'requirements-ml.txt'];
       for (const kind of ['zero', 'ridge', 'lightgbm', 'tcn', 'failed']) enqueueExperiment(root, { key: `fixture/${kind}`, seed: 41,
         workerModule: new URL('../experiments/eth-forecast/worker.mjs', import.meta.url), dependencies,
         configuration: { kind: kind === 'failed' ? 'tcn' : kind, maxBars: 300, python, environment,
@@ -126,6 +130,13 @@ test('forecast adapters train, reload, gate availability, and register all trial
       assert.equal(new Set(results.map(result => result.validationTimesHash)).size, 1);
       assert.equal(new Set(results.map(result => result.dataHash)).size, 1);
       assert.ok(results.every(result => !result.finalReleased));
+      for (const job of completed) {
+        const directory = job.attempts.at(-1).outputDirectory;
+        const plan = JSON.parse(readFileSync(join(directory, 'split-plan.json'), 'utf8'));
+        const model = JSON.parse(readFileSync(join(directory, 'model.json'), 'utf8'));
+        assert.equal(plan.folds[0].validationPurged.length, 5);
+        assert.ok(BigInt(model.selectedThrough) < BigInt(samples[plan.final[0]].time));
+      }
       for (const job of completed) verifyExperimentArtifacts(root, job.key);
       const artifact = join(completed[0].attempts.at(-1).outputDirectory, 'model.json');
       writeFileSync(artifact, readFileSync(artifact, 'utf8') + ' ');

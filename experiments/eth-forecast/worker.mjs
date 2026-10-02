@@ -8,9 +8,8 @@ export default async function experiment(configuration, context) {
     { bars: fixtureBars(maxBars, datasetSeed), provenance: { fixture: true, datasetSeed } };
   const { samples, schema, contract, dataHash } = ethForecastData(loaded.bars.slice(0, maxBars), manifestPath ? 'binance-usdm' : 'synthetic');
   const trainSize = Math.floor(samples.length * 0.6), finalStart = Math.floor(samples.length * 0.8);
-  // Five development samples before finalStart remain unused so validation
-  // labels are strictly earlier than the final period, including equality.
-  const validationSize = finalStart - trainSize - 5;
+  // The split module purges labels reaching final data using their actual availability.
+  const validationSize = finalStart - trainSize;
   const plan = walkForwardSplits(samples, { trainSize, validationSize, finalStart, stepSize: samples.length });
   const fold = plan.folds[0];
   const rows = foldRows(samples, plan, fold.id, 'train', 'train').map(row => ({ ...row, partition: 'train' }));

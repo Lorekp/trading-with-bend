@@ -1,4 +1,4 @@
-import { hash, nat, requireThat } from './framework.mjs';
+import { hash, nat, requireThat } from './core.mjs';
 import { featureSchema, validateFeatureArtifact } from './features.mjs';
 
 /** Pack completed, regular observations oldest-first. Prices must belong to the

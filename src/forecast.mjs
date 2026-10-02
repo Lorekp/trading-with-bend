@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { hash, nat, requireThat } from './framework.mjs';
+import { hash, nat, requireThat } from './core.mjs';
 import { featureSchema, validateFeatureArtifact } from './features.mjs';
 import { fitStandardScaler, validateScaler, regressionMetrics } from './models.mjs';
 import { populationMoments } from './numerics.mjs';

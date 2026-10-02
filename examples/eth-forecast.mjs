@@ -10,7 +10,7 @@ const manifestPath = process.argv[3] ? resolve(process.argv[3]) : null;
 const maxBars = Number(process.argv[4] || (manifestPath ? 1440 : 600));
 const python = process.env.ML_PYTHON || 'python';
 const environment = forecastRuntime({ python });
-const dependencies = ['../experiments/eth-forecast/data.mjs', '../src/ml/forecast.py', '../requirements-ml.txt'].map(path => new URL(path, import.meta.url));
+const dependencies = ['../experiments/eth-forecast/data.mjs', '../requirements-ml.txt'].map(path => new URL(path, import.meta.url));
 if (manifestPath) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   const dataset = manifest.datasets.find(item => item.type === 'klines');

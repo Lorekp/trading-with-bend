@@ -37,6 +37,7 @@ test('data, features, parameter grids and registry readers work without a build 
   const directory = copyProject(t, { runtime: false });
   const { parseQuoteCsv, QUOTE_UNITS } = await load(directory, 'src/data.mjs');
   const { computeFeatures } = await load(directory, 'src/features.mjs');
+  const { sequenceSamples } = await load(directory, 'src/sequence-data.mjs');
   const { parameterGrid } = await load(directory, 'src/search.mjs');
   const { enqueueExperiment, listExperiments } = await load(directory, 'src/experiments.mjs');
   const instrument = { symbol: 'TEST', currency: 'EUR', lotSize: '1', priceTick: '1' };
@@ -47,6 +48,12 @@ test('data, features, parameter grids and registry readers work without a build 
     [{ name: 'mean', source: 'price', kind: 'mean', window: 2, unit: 'quote-minor-per-lot' }]);
   assert.equal(features[0].ready, false);
   assert.deepEqual(features[1].values, [100]);
+  const sequence = sequenceSamples({
+    observations: features.map((feature, i) => ({ feature, price: Number(quotes[i].bid) })),
+    schema: [{ name: 'mean', source: 'price', kind: 'mean', window: 2, unit: 'quote-minor-per-lot' }],
+    instrument: 'TEST', venue: 'fixture', sequenceLength: 1, horizonSteps: 1, intervalMs: '1',
+  });
+  assert.deepEqual(sequence.latest.feature.values, [100]);
   assert.deepEqual(parameterGrid({ window: [2, 4] }), [{ window: 2 }, { window: 4 }]);
   const registry = join(directory, 'registry');
   assert.deepEqual(listExperiments(registry), []);
@@ -113,6 +120,40 @@ test('a freshly loaded runtime rejects source changes absent from build evidence
   appendFileSync(join(directory, 'bend/Engine.bend'), '\n# Edited before module import without rebuilding.\n');
   const { Backtest } = await load(directory, 'src/framework.mjs');
   assert.throws(() => new Backtest(demo.config), hasCode('STALE_BUILD'));
+});
+
+test('checkpoints survive research and CLI edits in a fresh runtime but reject replay host changes', async t => {
+  const original = copyProject(t);
+  const { Backtest } = await load(original, 'src/framework.mjs');
+  const run = new Backtest(demo.config).run(demo.events.slice(0, 3));
+  const checkpoint = run.checkpoint();
+  const expected = run.run(demo.events.slice(3)).report();
+  for (const file of ['src/cli.mjs', 'src/ml/forecast.py', 'src/framework.mjs', 'src/core.mjs']) {
+    const directory = copyProject(t);
+    appendFileSync(join(directory, file), '\n');
+    const { Backtest: Reloaded } = await load(directory, 'src/framework.mjs');
+    if (file === 'src/framework.mjs' || file === 'src/core.mjs') {
+      assert.throws(() => Reloaded.resume(checkpoint), hasCode('CHECKPOINT_VERSION'));
+    } else {
+      const actual = Reloaded.resume(checkpoint).run(demo.events.slice(3)).report();
+      assert.deepEqual(actual.ledger, expected.ledger);
+      assert.deepEqual(actual.fills, expected.fills);
+      assert.equal(actual.traceHash, expected.traceHash);
+      assert.notEqual(actual.manifest.sourceHashes[file], expected.manifest.sourceHashes[file]);
+    }
+  }
+});
+
+test('toolkit provenance automatically pins nested Python implementation changes', async t => {
+  const directory = copyProject(t);
+  const { runtimeProvenance } = await load(directory, 'src/provenance.mjs');
+  const { enqueueExperiment, listExperiments } = await load(directory, 'src/experiments.mjs');
+  assert.match(runtimeProvenance()['src/ml/forecast.py'], /^[a-f0-9]{64}$/);
+  appendFileSync(join(directory, 'src/ml/forecast.py'), '\n');
+  const worker = join(directory, 'worker.mjs'), registry = join(directory, 'registry');
+  writeFileSync(worker, 'export default () => ({});');
+  assert.throws(() => enqueueExperiment(registry, { key: 'changed-backend', configuration: {}, workerModule: worker }), hasCode('STALE_RUNTIME'));
+  assert.deepEqual(listExperiments(registry), []);
 });
 
 // Exercise the real compiled runtime through its callers. No Backtest or queue

@@ -1,6 +1,6 @@
 import { verifyBendRuntime } from './bend-runtime.mjs';
 import { BacktestError, freeze, canonical, checked, hash, json, nat, requireThat } from './core.mjs';
-import { sourceManifest } from './provenance.mjs';
+import { checkpointSources, sourceManifest } from './provenance.mjs';
 
 const text = (s, name) => requireThat(typeof s === 'string' && s.length > 0, 'MISSING_FIELD', `${name} is required`);
 function keys(object, allowed, name) {
@@ -249,13 +249,13 @@ export class Backtest {
   checkpoint() {
     // Event-sourced checkpoint: replay reconstructs reservations, queues, cancellations,
     // deduplication identities, valuations and all other continuation state.
-    const body = { format: 'bend-backtest-checkpoint-v1', config: this.#config, options: this.#options, events: this.#events, errors: this.#errors, sources: this.#sources };
+    const body = { format: 'bend-backtest-checkpoint-v2', config: this.#config, options: this.#options, events: this.#events, errors: this.#errors, sources: checkpointSources(this.#sources) };
     return JSON.parse(json({ ...body, checksum: hash(body) }));
   }
   static resume(checkpoint) {
     const { checksum, ...body } = checkpoint;
-    requireThat(body.format === 'bend-backtest-checkpoint-v1' && checksum === hash(body), 'CHECKPOINT_CORRUPT', 'Checkpoint format or checksum invalid');
-    requireThat(canonical(body.sources) === canonical(sourceManifest()), 'CHECKPOINT_VERSION', 'Checkpoint source artifacts differ from this engine');
+    requireThat(body.format === 'bend-backtest-checkpoint-v2' && checksum === hash(body), 'CHECKPOINT_CORRUPT', 'Checkpoint format or checksum invalid');
+    requireThat(canonical(body.sources) === canonical(checkpointSources(sourceManifest())), 'CHECKPOINT_VERSION', 'Checkpoint source artifacts differ from this engine');
     const run = new Backtest(body.config, body.options ?? {}).run(body.events);
     run.#errors = freeze(structuredClone(body.errors)).slice();
     return run;
