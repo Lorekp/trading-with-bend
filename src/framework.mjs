@@ -1,11 +1,7 @@
 import { readFileSync } from 'node:fs';
 import Engine from '../build/engine.mjs';
-import { BacktestError, canonical, checked, hash, json, nat, requireThat } from './core.mjs';
+import { BacktestError, freeze, canonical, checked, hash, json, nat, requireThat } from './core.mjs';
 import { runtimeProvenance, sourceManifest } from './provenance.mjs';
-
-// Only values recursively frozen here may bypass future recursive traversal.
-// Object.isFrozen alone is insufficient: callers can shallow-freeze containers.
-const DEEP_FROZEN = new WeakSet();
 
 const text = (s, name) => requireThat(typeof s === 'string' && s.length > 0, 'MISSING_FIELD', `${name} is required`);
 function keys(object, allowed, name) {
@@ -296,45 +292,4 @@ export class Backtest {
       fills: this.#fills, valuations: this.#valuations, trace: this.#trace, traceHash: hash(this.#trace)
     }));
   }
-}
-
-// Strategy callback receives a deep-frozen history prefix and current portfolio only.
-// The callback's external closures are outside the information-access boundary.
-function freeze(value) {
-  if (value && typeof value === 'object' && !DEEP_FROZEN.has(value)) {
-    Object.values(value).forEach(freeze); Object.freeze(value); DEEP_FROZEN.add(value);
-  }
-  return value;
-}
-// lookback bounds callback-visible history only. Full events remain available
-// for replay/checkpoints. tickCount always counts all consumed market ticks.
-export function runStrategy(config, ticks, onTick, options = {}) {
-  keys(options, ['lookback', 'traceMode', 'orderStorage'], 'strategy options');
-  requireThat(typeof onTick === 'function', 'STRATEGY_INPUT', 'Expected a strategy callback');
-  const requiredLookback = onTick.lookback;
-  requireThat(requiredLookback === undefined || Number.isSafeInteger(requiredLookback) && requiredLookback > 0, 'STRATEGY_LOOKBACK', 'Strategy lookback must be a positive safe integer');
-  const lookback = options.lookback;
-  requireThat(lookback === undefined || Number.isSafeInteger(lookback) && lookback > 0, 'STRATEGY_LOOKBACK', 'lookback must be a positive safe integer');
-  requireThat(lookback === undefined || requiredLookback === undefined || lookback >= requiredLookback, 'STRATEGY_LOOKBACK', 'lookback must cover the strategy history requirement');
-  const run = new Backtest(config, { ...(options.traceMode === undefined ? {} : { traceMode: options.traceMode }), ...(options.orderStorage === undefined ? {} : { orderStorage: options.orderStorage }) }), history = [];
-  config = run.config;
-  let sequence = 0n, orderId = 0n, tickCount = 0, sourceSequence = null;
-  for (const tick of ticks) {
-    requireThat(tick.type === 'tick', 'STRATEGY_INPUT', 'runStrategy accepts ticks only');
-    validateEvent(tick, run.config);
-    const nextSourceSequence = BigInt(tick.sequence);
-    requireThat(sourceSequence === null || nextSourceSequence > sourceSequence, 'OUT_OF_ORDER', 'Input quote sequence numbers must strictly increase');
-    sourceSequence = nextSourceSequence;
-    run.step({ ...tick, sequence: String(++sequence) }); history.push(freeze(structuredClone(tick))); tickCount++;
-    if (lookback !== undefined && history.length > lookback) history.shift();
-    const decisions = onTick(freeze({ config, history: history.slice(), tickCount, ledger: run.ledger, orders: run.workingOrders })) || [];
-    requireThat(Array.isArray(decisions), 'STRATEGY_OUTPUT', 'Strategy must return an array of submit/cancel decisions');
-    for (const decision of decisions) {
-      requireThat(['submit', 'cancel'].includes(decision.type), 'STRATEGY_OUTPUT', 'Only submit/cancel decisions are supported');
-      const event = { ...decision, id: `strategy-${++sequence}`, time: tick.time, sequence: String(sequence), symbol: config.instrument.symbol, currency: config.instrument.currency };
-      if (decision.type === 'submit') event.orderId = String(++orderId);
-      run.step(event);
-    }
-  }
-  return run;
 }

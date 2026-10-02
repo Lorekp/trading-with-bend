@@ -1,5 +1,34 @@
 # ETH data experiments
 
+## Binance information / Hyperliquid execution data
+
+`node scripts/download-hyperliquid.mjs` reads the existing Binance September
+manifest and downloads Hyperliquid ETH public API data into
+`data/hyperliquid/perp/ETH/2026-09/`. Raw responses, native-decimal CSVs, SHA-256
+hashes, request parameters and timestamp coverage are retained in separate
+snapshot directories. Exit code 2 means the execution dataset is incomplete.
+
+The October 2 acquisition contains 2,880 complete September 15-minute candles
+and 720 hourly funding settlements. The 4,488 five-minute candles begin September
+15 at 10:00 UTC; the 2,441 minute candles begin September 29 at 07:19 UTC. These
+are partial windows, not full-month minute data. All downloaded candle timestamps
+were matched against Binance at the corresponding interval. The local
+`pairing.json` identifies Binance as information and Hyperliquid as execution and
+records the exact common windows.
+
+The [public API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+retains only the most recent 5,000 candles per interval. Historical L2 books,
+trades and asset contexts need the
+[requester-pays archives](https://hyperliquid.gitbook.io/hyperliquid-docs/historical-data),
+which were not downloaded because AWS access is unavailable. The manifest keeps
+`executionReady: false`; candles do not establish executable bid/ask liquidity.
+Funding is stored as data; the cash-only adapters do not book perpetual funding
+or margin. Binance USDT and Hyperliquid USD prices/USDC collateral retain their
+native units, with no implicit currency conversion. Downloaded current metadata
+is explicitly a retrieval-time reference rather than historical margin settings.
+
+## Binance study
+
 Run from the repository root:
 
 ```powershell
@@ -88,14 +117,17 @@ and scaler artifacts are saved for every fit. Parameters are examples for system
 verification; the campaign is not a strategy-selection recommendation.
 
 ```js
-import { loadBinanceBars, createBarStrategy, runBarStrategy } from './src/index.mjs';
+import { loadBinanceBars, createBarStrategy, runBarStrategy, barInformationSource, BarExecutionVenue } from './src/index.mjs';
 
 const { bars, provenance } = await loadBinanceBars({
   manifestPath: 'data/binance/um/ETHUSDT/2026-09/manifest.json',
   intervalMinutes: 5,
 });
 const strategy = createBarStrategy({ type: 'ma-cross', quantity: '1000', fast: 12, slow: 48 });
-const result = runBarStrategy(config, bars, strategy, { maxPositionLots: '1000' });
+const source = barInformationSource({ id: 'binance-information', instrument: config.instrument, bars });
+// This scenario explicitly uses the same bars for its cash-price proxy venue.
+const venue = new BarExecutionVenue({ id: 'binance-cash-price-proxy', config, bars, maxPositionLots: '1000' });
+const result = runBarStrategy(source, venue, strategy);
 const report = result.report();
 // Supply config as in experiments/eth/worker.mjs, which also registers artifacts.
 ```
@@ -103,7 +135,8 @@ const report = result.report();
 Factories are stateful; create a fresh one for each replay. Custom `onBar` returns
 canonical target lots or explicit `null`, and sees only immutable completed
 history, the current ledger and working orders. Closed orders remain available
-in the underlying backtest/report. The history bound must cover `strategy.lookback`.
+in `venue.backtest` and the report. Information and execution can be replaced
+independently; see [ADAPTERS.md](ADAPTERS.md). The history bound must cover `strategy.lookback`.
 Unknown options fail. Callback closures/file access remain trusted code, not a
 sandbox. Engine checkpoints restore accounting/events only; resuming a stateful
 strategy requires replaying its feature/model history or separately saving it.

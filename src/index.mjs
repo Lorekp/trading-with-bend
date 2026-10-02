@@ -1,6 +1,10 @@
-export { Backtest, runStrategy } from './framework.mjs';
+export { Backtest } from './framework.mjs';
 export { BacktestError, hash, json, MAX_NAT } from './core.mjs';
 export { runtimeProvenance } from './provenance.mjs';
+export { runStrategy } from './replay.mjs';
+export { InformationSource, quoteInformationSource, barInformationSource } from './information-source.mjs';
+export { QuoteExecutionVenue } from './execution-venue.mjs';
+export { BarExecutionVenue } from './bar-execution-venue.mjs';
 export { cappedLots, affordableLots, trainingAllowed, modelReady, canReadPartition, barExecutionAllowed } from './policies.mjs';
 export { validateModelArtifact, EvaluationSession } from './research.mjs';
 export { runExperiment, enqueueExperiment, runQueue, listExperiments, recoverExperiment, readExperimentResult, verifyExperimentArtifacts, deterministicSeed } from './experiments.mjs';

@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { Session } from 'node:inspector';
-import { runStrategy } from '../src/framework.mjs';
+import { runStrategy, quoteInformationSource, QuoteExecutionVenue } from '../src/index.mjs';
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
@@ -24,17 +24,18 @@ let seen = 0, submitted = 0;
 const every = Math.max(1, Math.floor((count - 1) / Math.max(1, targetOrders)));
 const strategy = ({ history, ledger }) => {
   seen++;
-  if (submitted >= targetOrders || (seen - 1) % every !== 0 || seen === count) return [];
+  if (submitted >= targetOrders || (seen - 1) % every !== 0 || seen === count) return null;
   submitted++;
-  const side = ledger.quantity > 0n ? 'sell' : 'buy';
-  return [{ type: 'submit', side, limit: side === 'buy' ? history.at(-1).ask : history.at(-1).bid, quantity: '1' }];
+  return ledger.quantity > 0n ? '0' : '1';
 };
 global.gc?.();
 const profiler = args.includes('--profile') ? new Session() : null;
 const profileCall = method => new Promise((resolve, reject) => profiler.post(method, (error, result) => error ? reject(error) : resolve(result)));
 if (profiler) { profiler.connect(); await profileCall('Profiler.enable'); await profileCall('Profiler.start'); }
 const initial = process.memoryUsage(), start = performance.now();
-const run = runStrategy(config, ticks, strategy, { ...(lookback === undefined ? {} : { lookback }), traceMode, orderStorage });
+const venue = new QuoteExecutionVenue({ id: 'benchmark-execution', config, ticks, maxPositionLots: '1', traceMode, orderStorage });
+const replay = runStrategy(quoteInformationSource({ id: 'benchmark-information', instrument: config.instrument, ticks }), venue, strategy, { lookback });
+const run = venue.backtest;
 const replayFinished = performance.now(), replayMemory = process.memoryUsage();
 let profile;
 if (profiler) {
@@ -42,7 +43,7 @@ if (profiler) {
   const samples = stopped.profile.nodes.reduce((sum, node) => sum + (node.hitCount ?? 0), 0);
   profile = stopped.profile.nodes.filter(node => node.hitCount > 0).sort((a, b) => b.hitCount - a.hitCount).slice(0, 12).map(node => ({ function: node.callFrame.functionName || '(anonymous)', file: node.callFrame.url.split('/').at(-1), line: node.callFrame.lineNumber + 1, selfPercent: Math.round(1000 * node.hitCount / samples) / 10 }));
 }
-const report = args.includes('--no-report') ? null : run.report();
+const report = args.includes('--no-report') ? null : replay.report();
 const end = performance.now(), final = process.memoryUsage();
 console.log(JSON.stringify({
   label: option('--label', 'benchmark'), ticks: count, targetOrders, submitted, lookback: lookback ?? 'full', traceMode, orderStorage,

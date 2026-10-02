@@ -47,7 +47,7 @@ test('Bend specification gate rejects deliberate accounting, cap and leakage reg
       else if (process.platform === 'win32') {
         command = 'wsl';
         const wslPath = input.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`);
-        args = ['-d', 'Ubuntu-24.04', '--', './.tools/bun-linux-x64/bun', '.tools/bend/bend2/main.ts', wslPath, '--check-only'];
+        args = ['-d', process.env.BEND_WSL_DISTRO || 'Ubuntu-24.04', '--', './.tools/bun-linux-x64/bun', '.tools/bend/bend2/main.ts', wslPath, '--check-only'];
       } else { command = resolve('.tools/bun-linux-x64/bun'); args = ['.tools/bend/bend2/main.ts', input, '--check-only']; }
       const result = spawnSync(command, args, { encoding: 'utf8', timeout: 25000 });
       assert.ifError(result.error);

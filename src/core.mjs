@@ -26,3 +26,15 @@ export function canonical(value) {
   return JSON.stringify(value);
 }
 export const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonical(value)).digest('hex');
+
+// Only values recursively frozen here may bypass future recursive traversal.
+// Object.isFrozen alone is insufficient: callers can shallow-freeze containers.
+const DEEP_FROZEN = new WeakSet();
+
+
+export function freeze(value) {
+  if (value && typeof value === 'object' && !DEEP_FROZEN.has(value)) {
+    Object.values(value).forEach(freeze); Object.freeze(value); DEEP_FROZEN.add(value);
+  }
+  return value;
+}

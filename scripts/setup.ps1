@@ -17,7 +17,8 @@ if (-not (Test-Path -LiteralPath '.tools/bun-linux-x64/bun')) {
   if ($taskHash -ne $taskPin.bunLinuxX64ZipSha256) { throw 'Bun archive checksum mismatch' }
   Expand-Archive -LiteralPath '.tools/bun-linux.zip' -DestinationPath '.tools'
 }
-wsl -d Ubuntu-24.04 -- chmod +x .tools/bun-linux-x64/bun
-if ($LASTEXITCODE -ne 0) { throw 'Ubuntu-24.04 WSL is required. See README.md.' }
+$taskDistribution = if ($env:BEND_WSL_DISTRO) { $env:BEND_WSL_DISTRO } else { 'Ubuntu-24.04' }
+wsl -d $taskDistribution -- chmod +x .tools/bun-linux-x64/bun
+if ($LASTEXITCODE -ne 0) { throw "WSL distribution '$taskDistribution' is required. Set BEND_WSL_DISTRO to use another installed distribution. See README.md." }
 node scripts/build.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }

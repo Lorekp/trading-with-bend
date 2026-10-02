@@ -5,12 +5,13 @@ import { createHash, randomUUID } from 'node:crypto';
 const pin = JSON.parse(readFileSync('toolchain.json', 'utf8'));
 const source = resolve('.tools/bend/bend2/main.ts');
 const useWsl = process.platform === 'win32' && !process.env.BEND_BIN;
+const wslDistribution = process.env.BEND_WSL_DISTRO || 'Ubuntu-24.04';
 const command = process.env.BEND_BIN || (useWsl ? 'wsl' : (existsSync('.tools/bun-linux-x64/bun') ? resolve('.tools/bun-linux-x64/bun') : 'bun'));
 const localKernel = existsSync('.tools/lean-4.34.0-linux/bin/lean') && !process.env.BEND_BIN;
 const checkKernel = process.argv.includes('--verdict') || localKernel;
 const kernelEnv = localKernel ? { ...process.env, BENDTT: resolve('.tools/bendtt/bendtt') } : process.env;
 const prefix = process.env.BEND_BIN ? [] : (useWsl
-  ? ['-d', 'Ubuntu-24.04', '--', ...(localKernel ? ['env', 'BENDTT=.tools/bendtt/bendtt'] : []), './.tools/bun-linux-x64/bun', '.tools/bend/bend2/main.ts']
+  ? ['-d', wslDistribution, '--', ...(localKernel ? ['env', 'BENDTT=.tools/bendtt/bendtt'] : []), './.tools/bun-linux-x64/bun', '.tools/bend/bend2/main.ts']
   : [source]);
 function run(args) {
   const result = spawnSync(command, [...prefix, ...args], { encoding: 'utf8', env: useWsl ? process.env : kernelEnv });
@@ -44,7 +45,7 @@ if (!process.env.BEND_BIN) {
 run(['PROOF.bend', '--check-only']);
 if (checkKernel) {
   if (localKernel) {
-    const result = spawnSync(useWsl ? 'wsl' : 'bash', useWsl ? ['-d', 'Ubuntu-24.04', '--', 'bash', 'scripts/build-kernel.sh'] : ['scripts/build-kernel.sh'], { stdio: 'inherit' });
+    const result = spawnSync(useWsl ? 'wsl' : 'bash', useWsl ? ['-d', wslDistribution, '--', 'bash', 'scripts/build-kernel.sh'] : ['scripts/build-kernel.sh'], { stdio: 'inherit' });
     if (result.error || result.status !== 0) throw new Error(`Kernel build failed: ${result.error || result.status}`);
   }
   run(['PROOF.bend', '--verdict']);

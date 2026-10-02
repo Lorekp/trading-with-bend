@@ -1,10 +1,10 @@
+import { runStrategy, quoteInformationSource, QuoteExecutionVenue } from '../src/index.mjs';
 // Shared worker example: identical data/evaluation windows for rules and ML.
 import { syntheticQuotes } from '../src/data.mjs';
 import { computeFeatures } from '../src/features.mjs';
 import { fitRidge, predictRidge, evaluateRegression } from '../src/models.mjs';
 import { walkForwardSplits, foldRows } from '../src/evaluation.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion, targetPosition } from '../src/strategies.mjs';
-import { runStrategy } from '../src/framework.mjs';
 import { hash } from '../src/core.mjs';
 
 export default async function experiment(configuration, context) {
@@ -46,7 +46,10 @@ export default async function experiment(configuration, context) {
   const config = { instrument, initialCash: '20000', feePerLot: '1', orderLatencyMs: '1', cancelLatencyMs: '2', maxQuoteAgeMs: '100', manifest: {
     datasetVersion: `synthetic-xorshift32-${datasetSeed}`, strategyArtifact: model?.hash ?? hash({ kind, parameters }), evaluationProtocol: `validation-only/${fold.hash}`, seed: String(context.seed)
   } };
-  const report = runStrategy(config, evaluationTicks, strategy).report();
+  const report = runStrategy(
+    quoteInformationSource({ id: 'synthetic-information', instrument, ticks: evaluationTicks }),
+    new QuoteExecutionVenue({ id: 'synthetic-cash-venue', config, ticks: evaluationTicks, maxPositionLots: execution.quantity }),
+    strategy).report();
   context.writeArtifact('split-plan.json', plan); context.writeArtifact('report.json', report);
   return { kind, parameters, datasetHash: hash(ticks), foldHash: fold.hash, report, regressionMetrics: regression ? { mse: regression.mse, mae: regression.mae } : null };
 }

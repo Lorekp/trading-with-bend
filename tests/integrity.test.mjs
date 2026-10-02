@@ -9,6 +9,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const demo = JSON.parse(readFileSync(join(root, 'examples/demo.json'), 'utf8'));
 const projectFiles = [
   'scripts/build.mjs', 'toolchain.json', 'package.json', 'LAWS.bend', 'PROOF.bend',
+  'build/engine.mjs', 'build/policy.mjs', 'build/archive.mjs', 'build/verification.json',
 ];
 
 function copyProject(t, { runtime = true } = {}) {
@@ -24,7 +25,8 @@ function copyProject(t, { runtime = true } = {}) {
     mkdirSync(dirname(destination), { recursive: true });
     copyFileSync(join(root, file), destination);
   }
-  for (const folder of runtime ? ['src', 'bend', 'build'] : ['src']) cpSync(join(root, folder), join(directory, folder), { recursive: true });
+  // Build can contain other worktrees; copy its artifacts explicitly above.
+  for (const folder of runtime ? ['src', 'bend'] : ['src']) cpSync(join(root, folder), join(directory, folder), { recursive: true });
   return directory;
 }
 

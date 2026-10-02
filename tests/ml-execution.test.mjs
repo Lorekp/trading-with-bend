@@ -1,9 +1,9 @@
+import { replayQuotes as runStrategy } from './replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { computeFeatures } from '../src/features.mjs';
 import { fitRidge, predictRidge } from '../src/models.mjs';
 import { targetPosition } from '../src/strategies.mjs';
-import { runStrategy } from '../src/framework.mjs';
 
 test('a trained model target produces causal executable fills through the shared ledger', () => {
   const schema = [{ name: 'price', source: 'price', kind: 'value', unit: 'quote-minor-per-lot' }];

@@ -1,3 +1,4 @@
+import { barInformationSource, BarExecutionVenue } from '../../src/index.mjs';
 import { performance } from 'node:perf_hooks';
 import { loadBinanceBars } from '../../src/binance-bars.mjs';
 import { createBarStrategy } from '../../src/bar-strategies.mjs';
@@ -16,7 +17,10 @@ export default async function ethExperiment(configuration, context) {
       datasetVersion: hash(dataset.provenance), strategyArtifact: hash(specification),
       evaluationProtocol: 'development-system-verification/online-trailing-only/v1', seed: String(context.seed)
     } };
-  const replay = runBarStrategy(config, dataset.bars, strategy, { ...execution, maxPositionLots: specification.quantity, traceMode: 'compact' });
+  const replay = runBarStrategy(
+    barInformationSource({ id: 'binance-information', instrument: config.instrument, bars: dataset.bars }),
+    new BarExecutionVenue({ id: 'binance-cash-price-proxy', config, bars: dataset.bars, ...execution, maxPositionLots: specification.quantity, traceMode: 'compact' }),
+    strategy);
   const replayed = performance.now();
   const report = replay.report();
   report.sourceData = dataset.provenance;

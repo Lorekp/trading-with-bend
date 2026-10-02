@@ -29,6 +29,8 @@ powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
 
 The setup script downloads the pinned Bend revision and a checksum-checked Bun 1.3.10 binary into `.tools`. It does not install global packages or create a WSL distribution. Compilation uses WSL because this Bend revision's import loader assumes POSIX paths; Node runs the emitted JavaScript on Windows. Linux x86-64: run `bash scripts/setup.sh` with Node, Git, curl and unzip installed. On other supported Bend platforms, install Bun and clone the exact revision in `toolchain.json` into `.tools/bend` before `npm run build`. `BEND_BIN` can select an external compiler; reports then explicitly mark its revision as unverified.
 
+To use another installed WSL distribution, set `$env:BEND_WSL_DISTRO = 'Debian'` before setup, build or test commands. The default is `Ubuntu-24.04`.
+
 ## What is implemented
 
 - Exact bounded integer cash and inventory; explicit fee postings; no floating-point ledger.
@@ -73,7 +75,7 @@ Quotes are executable model events, not guarantees that a real historical venue 
 ## Use the API
 
 ```js
-import { Backtest, runStrategy } from './src/framework.mjs';
+import { Backtest, runStrategy, quoteInformationSource, QuoteExecutionVenue } from './src/index.mjs';
 import { runExperiment } from './src/experiments.mjs';
 
 const { result } = runExperiment('output/experiments', input.config, () => {
@@ -83,21 +85,26 @@ const { result } = runExperiment('output/experiments', input.config, () => {
   return Backtest.resume(saved).run(input.events.slice(3)).report();
 });
 
-// Every callback sees frozen configuration, history, ledger and working orders.
-const simulated = runStrategy(input.config, ticks, ({ history }) =>
-  history.length === 1
-    ? [{ type: 'submit', side: 'buy', quantity: '1', limit: history[0].ask }]
-    : []
+// Supply information and execution data independently, even for one market.
+const source = quoteInformationSource({
+  id: 'signal-market', instrument: input.config.instrument, ticks: signalTicks,
+});
+const venue = new QuoteExecutionVenue({
+  id: 'execution-market', config: input.config, ticks: executionTicks,
+  maxPositionLots: '1',
+});
+const simulated = runStrategy(source, venue, ({ history }) =>
+  history.length === 1 ? '1' : null
 );
 ```
 
-`runStrategy` assigns order IDs starting at 1; cancellation callbacks use those IDs from the visible `orders`. A decision is generated after processing its observation, and can execute only on a strictly later timestamp. The callback is trusted code: closures, files, network access and precomputed signals cannot be sandboxed by this API. Wrap research runs in `runExperiment`; the CLI does this automatically, recording failed and interrupted trials too. Low-level engine calls are not automatically registered.
+`InformationSource` supplies market/features data. `ExecutionVenue` alone owns orders, fills, fees, funding, liquidity, margin and PnL. Strategies return target positions and receive immutable information history plus venue account state. Either adapter can be replaced independently; see [the adapter interfaces](docs/ADAPTERS.md). The shipped venues use the Bend cash model and explicitly do not implement perpetual funding or margin. Callbacks remain trusted JavaScript. Wrap research runs in `runExperiment`; the CLI does this automatically. Low-level engine calls are not automatically registered.
 
 ## Checks and proof boundary
 
 `npm test` builds the engine and runs the E2E-first suite: ZIP ingestion through real strategy fills and immutable reports, separate rule/ML worker processes, optimized/reference replay, checkpoint restoration, malformed-data/tampering rejection, deliberate failing proof mutations and competing experiment processes. Downloaded-data checks run automatically when the September manifest is present. `npm run test:regression` retains the older focused accounting, numerical and policy checks. New behavior should be tested through complete workflows.
 
-Build evidence is bound to hashes of the Bend sources and generated modules; stale builds cannot start a backtest. Provenance is captured for the loaded implementation and remains stable throughout a run. Builds hold an exclusive lock and reject source changes during verification. For large runs, use `runStrategy(..., { lookback: 64, traceMode: 'compact', orderStorage: 'active' })`. The ETH bridge uses bounded history, compact recording and active storage by default, retaining all fills and final order records.
+Build evidence is bound to hashes of the Bend sources and generated modules; stale builds cannot start a backtest. Provenance is captured for the loaded implementation and remains stable throughout a run. Builds hold an exclusive lock and reject source changes during verification. For large runs, use `runStrategy(source, venue, strategy, { lookback: 64 })` and configure the venue with `{ traceMode: 'compact', orderStorage: 'active' }`. The ETH bridge uses bounded history, compact recording and active storage by default, retaining all fills and final order records.
 
 ```powershell
 npm run proof
