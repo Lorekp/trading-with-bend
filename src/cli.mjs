@@ -1,8 +1,9 @@
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Backtest, hash, json, requireThat } from './framework.mjs';
-import { runExperiment } from './research.mjs';
+import { Backtest } from './framework.mjs';
+import { hash, json, requireThat } from './core.mjs';
+import { runExperiment } from './experiments.mjs';
 
 const args = process.argv.slice(2);
 if (!args.length || args.includes('--help')) {
@@ -11,11 +12,11 @@ if (!args.length || args.includes('--help')) {
   try {
     requireThat(args.length === 1 || (args.length === 3 && args[1] === '--out'), 'CLI_ARGUMENTS', 'Expected input.json [--out report.json]');
     const out = args[2] || `output/reports/${randomUUID()}.json`;
-    const { id, result } = runExperiment('output/experiments', { input: args[0], output: out }, recordInput => {
-      const raw = readFileSync(args[0], 'utf8'); recordInput({ rawHash: hash(raw) });
+    const { id, result } = runExperiment('output/experiments', { input: args[0], output: out }, (_configuration, context) => {
+      const raw = readFileSync(args[0], 'utf8'); context.writeArtifact('raw-input.json', { rawHash: hash(raw) });
       const input = JSON.parse(raw);
       requireThat(Array.isArray(input.events), 'INPUT_EVENTS', 'events must be an array');
-      recordInput({ rawHash: hash(raw), config: input.config, datasetHash: hash(input.events) });
+      context.writeArtifact('inputs.json', { rawHash: hash(raw), config: input.config, datasetHash: hash(input.events) });
       const report = new Backtest(input.config).run(input.events).report();
       mkdirSync(dirname(out), { recursive: true }); writeFileSync(out, json(report) + '\n', { flag: 'wx' });
       return report;

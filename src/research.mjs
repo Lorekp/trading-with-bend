@@ -1,7 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
-import { hash, json, nat, requireThat } from './framework.mjs';
+import { hash, nat, requireThat } from './core.mjs';
 import { canReadPartition, modelReady } from './policies.mjs';
 
 export function validateModelArtifact(artifact, schema, decisionTime) {
@@ -31,29 +28,5 @@ export class EvaluationSession {
     requireThat(allowed, 'FINAL_TEST_ACCESS', 'Requested partition is not permitted for this role');
     if (role === 'final') { requireThat(!this.#finalUsed, 'FINAL_TEST_REUSE', 'Final evaluation already consumed in this session'); this.#finalUsed = true; }
     return structuredClone(this.#protocol);
-  }
-}
-
-// Register before work starts; an interrupted process leaves a visible running trial.
-export function runExperiment(directory, configuration, work) {
-  mkdirSync(directory, { recursive: true });
-  const id = randomUUID(), path = join(directory, `${id}.json`);
-  const snapshot = structuredClone(configuration);
-  const record = { id, configuration: snapshot, configurationHash: hash(snapshot), status: 'running', startedAt: new Date().toISOString() };
-  writeFileSync(path, json(record), { flag: 'wx' });
-  const save = extra => {
-    const temporary = `${path}.tmp`;
-    writeFileSync(temporary, json({ ...record, ...extra }), { flag: 'wx' });
-    renameSync(temporary, path);
-  };
-  const finish = extra => save({ ...extra, finishedAt: new Date().toISOString() });
-  try {
-    const result = work(inputs => { record.inputs = structuredClone(inputs); save({}); });
-    requireThat(!result?.then, 'ASYNC_EXPERIMENT', 'Use synchronous work with this registry');
-    finish({ status: 'completed', resultHash: hash(result) });
-    return { id, result };
-  } catch (error) {
-    finish({ status: 'failed', error: { code: error.code || 'ERROR', message: String(error.message || error) } });
-    throw error;
   }
 }

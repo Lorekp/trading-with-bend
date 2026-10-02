@@ -6,9 +6,78 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { canonicalExperimentJson, deterministicSeed, enqueueExperiment, listExperiments, readExperimentResult, recoverExperiment, runQueue, verifyExperimentArtifacts, writeExperimentArtifact } from '../src/experiments.mjs';
+import { canonicalExperimentJson, deterministicSeed, enqueueExperiment, listExperiments, readExperimentResult, recoverExperiment, runExperiment, runQueue, verifyExperimentArtifacts, writeExperimentArtifact } from '../src/experiments.mjs';
 
 const api = new URL('../src/experiments.mjs', import.meta.url).href;
+
+test('legacy inline registries fail explicitly instead of silently omitting their trials', t => {
+  const { registry, worker } = fixture(t);
+  mkdirSync(registry);
+  const path = join(registry, '11111111-1111-4111-8111-111111111111.json'), record = '{"status":"failed"}';
+  writeFileSync(path, record);
+  assert.throws(() => listExperiments(registry), { code: 'REGISTRY_VERSION' });
+  assert.throws(() => runExperiment(registry, {}, () => assert.fail('Must not execute')), { code: 'REGISTRY_VERSION' });
+  assert.throws(() => enqueueExperiment(registry, { key: 'new', configuration: {}, workerModule: worker }), { code: 'REGISTRY_VERSION' });
+  assert.equal(readFileSync(path, 'utf8'), record);
+  assert.deepEqual(readdirSync(registry), [path.split(/[\\/]/).at(-1)]);
+});
+
+test('inline and queued work share registration, immutable artifacts and verified result retrieval', async t => {
+  const { registry, worker } = fixture(t);
+  let retained;
+  const configuration = { trial: 'success' };
+  const completed = runExperiment(registry, configuration, (snapshot, context) => {
+    retained = context;
+    assert.ok(Object.isFrozen(context));
+    assert.deepEqual(snapshot, configuration);
+    snapshot.trial = 'callback mutation';
+    context.writeArtifact('metrics.json', { score: 42 });
+    assert.equal(listExperiments(registry)[0].status, 'running');
+    assert.throws(() => recoverExperiment(registry, context.key), { code: 'OWNER_ALIVE' });
+    return 42;
+  });
+  assert.deepEqual(configuration, { trial: 'success' });
+  assert.equal(retained.key, completed.id);
+  assert.equal(readExperimentResult(registry, completed.id), 42);
+  assert.deepEqual(Object.keys(verifyExperimentArtifacts(registry, completed.id)), ['metrics.json']);
+  assert.throws(() => retained.writeArtifact('late.json', {}), { code: 'ATTEMPT_FINISHED' });
+  assert.throws(() => runExperiment(registry, { trial: 'failure' }, () => { throw new Error('failed trial'); }), /failed trial/);
+  enqueueExperiment(registry, { key: 'queued', configuration: {}, workerModule: worker });
+  const records = listExperiments(registry);
+  assert.equal(records.length, 3);
+  assert.deepEqual(records.map(record => record.status).sort(), ['completed', 'failed', 'queued']);
+  assert.equal(records.find(record => record.key === completed.id).attempts[0].status, 'completed');
+  assert.deepEqual(records.find(record => record.key === completed.id).configuration, configuration);
+  const listed = await subprocess([fileURLToPath(cli), 'status', registry]).done;
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.deepEqual(JSON.parse(listed.stdout), records);
+  await runQueue(registry);
+  assert.deepEqual(readExperimentResult(registry, 'queued'), { configuration: {}, seed: deterministicSeed('queued') });
+  assert.equal(readExperimentResult(registry, completed.id), 42);
+  const finished = listExperiments(registry).find(record => record.key === completed.id).attempts[0];
+  writeFileSync(finished.resultPath, '99');
+  assert.throws(() => readExperimentResult(registry, completed.id), { code: 'RESULT_CHANGED' });
+});
+
+test('inline invalid results and synchronous or asynchronous errors retain failed attempts', async t => {
+  const { registry } = fixture(t);
+  for (const [work, code] of [
+    [() => ({ score: NaN }), 'INVALID_JSON'],
+    [() => { throw undefined; }, 'WORKER_ERROR'],
+    [() => { throw false; }, 'WORKER_ERROR'],
+    [async () => { throw new Error('async rejection'); }, 'ASYNC_EXPERIMENT'],
+  ]) {
+    const before = new Set(listExperiments(registry).map(job => job.key));
+    let returned = false;
+    try { runExperiment(registry, {}, work); returned = true; } catch {}
+    assert.equal(returned, false);
+    const job = listExperiments(registry).find(job => !before.has(job.key));
+    assert.equal(job.status, 'failed');
+    assert.equal(job.attempts[0].error.code, code);
+    assert.throws(() => readExperimentResult(registry, job.key), { code: 'RESULT_UNAVAILABLE' });
+  }
+  await delay(0); // Async rejection is consumed; it cannot escape the recorded failure.
+});
 const cli = new URL('../src/experiments-cli.mjs', import.meta.url);
 function fixture(t, code = 'export default async (configuration, context) => ({ configuration, seed: context.seed });') {
   const root = mkdtempSync(join(tmpdir(), 'bend-experiments-'));
@@ -166,7 +235,7 @@ test('manifest edits cannot execute or be accepted under an unchanged specificat
   await assert.rejects(runQueue(registry), { code: 'REGISTRY_CORRUPT' });
 });
 
-test('binary models and JSON metrics are bound to the result and checked for edits, additions and deletion', async t => {
+for (const execution of ['inline', 'worker']) test(`${execution} binary models and JSON metrics are checked for edits, additions and deletion`, async t => {
   const { registry, worker } = fixture(t, `
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -175,18 +244,54 @@ export default (configuration, context) => {
   writeFileSync(join(context.outputDirectory, 'model.bin'), Buffer.from([0, 1, 2, 255]));
   return { score: 7 };
 };`);
-  enqueueExperiment(registry, { key: 'model', configuration: {}, workerModule: worker });
+  let key;
+  if (execution === 'inline') key = runExperiment(registry, {}, (await import(pathToFileURL(worker).href)).default).id;
+  else { key = 'model'; enqueueExperiment(registry, { key, configuration: {}, workerModule: worker }); }
   const [job] = await runQueue(registry);
   const directory = job.attempts[0].outputDirectory;
-  assert.deepEqual(Object.keys(verifyExperimentArtifacts(registry, 'model')).sort(), ['metrics.json', 'model.bin']);
+  assert.deepEqual(Object.keys(verifyExperimentArtifacts(registry, key)).sort(), ['metrics.json', 'model.bin']);
   writeFileSync(join(directory, 'model.bin'), Buffer.from([3, 4]));
-  assert.throws(() => readExperimentResult(registry, 'model'), { code: 'ARTIFACT_CHANGED' });
+  assert.throws(() => readExperimentResult(registry, key), { code: 'ARTIFACT_CHANGED' });
   writeFileSync(join(directory, 'model.bin'), Buffer.from([0, 1, 2, 255]));
   writeFileSync(join(directory, 'extra.json'), '{}');
-  assert.throws(() => verifyExperimentArtifacts(registry, 'model'), { code: 'ARTIFACT_CHANGED' });
+  assert.throws(() => verifyExperimentArtifacts(registry, key), { code: 'ARTIFACT_CHANGED' });
   rmSync(join(directory, 'extra.json'));
   rmSync(join(directory, 'metrics.json'));
-  assert.throws(() => verifyExperimentArtifacts(registry, 'model'), { code: 'ARTIFACT_CHANGED' });
+  assert.throws(() => verifyExperimentArtifacts(registry, key), { code: 'ARTIFACT_CHANGED' });
+});
+
+test('concurrent recovery closes a dead inline owner and preserves its artifacts without queueing its closure', async t => {
+  const { registry } = fixture(t);
+  const runner = runProcess(`import { runExperiment } from ${JSON.stringify(api)};
+    runExperiment(${JSON.stringify(registry)}, { trial: 'interrupted' }, (configuration, context) => {
+      context.writeArtifact('partial.json', configuration);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+    });`);
+  t.after(() => runner.child.kill());
+  await eventually(() => {
+    const attempt = listExperiments(registry)[0]?.attempts[0];
+    return attempt && existsSync(join(attempt.outputDirectory, 'partial.json'));
+  });
+  const [running] = listExperiments(registry), attempt = running.attempts[0];
+  assert.equal(attempt.workerPid, runner.child.pid);
+  assert.equal(attempt.supervisorPid, runner.child.pid);
+  assert.throws(() => recoverExperiment(registry, running.key), { code: 'OWNER_ALIVE' });
+  assert.equal((await runQueue(registry))[0].status, 'running');
+  runner.child.kill(); await runner.done;
+  const recoveries = await Promise.all([0, 1].map(() => subprocess([fileURLToPath(cli), 'recover', registry, running.key]).done));
+  for (const recovery of recoveries) {
+    assert.equal(recovery.code, 0, recovery.stderr);
+    assert.equal(JSON.parse(recovery.stdout).status, 'abandoned');
+  }
+  const [abandoned] = await runQueue(registry);
+  assert.equal(abandoned.status, 'abandoned');
+  assert.equal(abandoned.attempts.length, 1);
+  assert.equal(abandoned.attempts[0].token, attempt.token);
+  assert.deepEqual(JSON.parse(readFileSync(join(attempt.outputDirectory, 'partial.json'), 'utf8')), { trial: 'interrupted' });
+  assert.throws(() => readExperimentResult(registry, running.key), { code: 'RESULT_UNAVAILABLE' });
+  const fresh = runExperiment(registry, running.configuration, () => ({ retried: true }));
+  assert.notEqual(fresh.id, running.key);
+  assert.deepEqual(listExperiments(registry).map(job => job.status).sort(), ['abandoned', 'completed']);
 });
 
 test('killed supervisor and worker require explicit recovery, preserving failed attempt history', async t => {

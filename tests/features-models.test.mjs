@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hash } from '../src/framework.mjs';
+import { hash } from '../src/core.mjs';
 import { RollingFeatures, featureSchema, computeFeatures, validateFeatureArtifact } from '../src/features.mjs';
 import { fitStandardScaler, transformFeatures, fitRidge, validateRidgeModel, predictRidge, evaluateRegression } from '../src/models.mjs';
 import { stableMean, populationMoments, rootMeanSquare } from '../src/numerics.mjs';

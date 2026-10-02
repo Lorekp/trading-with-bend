@@ -20,8 +20,8 @@ def subtract_added(amount, spare):
       subtract_added(p, spare)
 
 def Laws.buy_updates_ledger_exactly(spare, quantity, price, lots, fee):
-  %subtract_added(E.cost(price, lots, fee), spare) :
-    {E.Ledger{Nat.sub(Nat.add(E.cost(price, lots, fee), spare), E.cost(price, lots, fee)), Nat.add(quantity, lots)}
+  %subtract_added(Nat.mul(lots, Nat.add(price, fee)), spare) :
+    {E.Ledger{Nat.sub(Nat.add(Nat.mul(lots, Nat.add(price, fee)), spare), Nat.mul(lots, Nat.add(price, fee))), Nat.add(quantity, lots)}
      == E.Ledger{_, Nat.add(quantity, lots)} : E.Ledger}
   {==}
 

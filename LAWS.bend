@@ -10,7 +10,7 @@ law buy_updates_ledger_exactly:
   for price: Nat
   for lots: Nat
   for fee: Nat
-  {E.buy(Nat.add(E.cost(price, lots, fee), spare), quantity, price, lots, fee)
+  {E.buy(Nat.add(Nat.mul(lots, Nat.add(price, fee)), spare), quantity, price, lots, fee)
    == E.Ledger{spare, Nat.add(quantity, lots)} : E.Ledger}
 
 law sell_updates_ledger_exactly:

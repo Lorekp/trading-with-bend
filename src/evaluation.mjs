@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hash, json, nat, requireThat } from './framework.mjs';
+import { hash, json, nat, requireThat } from './core.mjs';
 import { trainingAllowed, canReadPartition } from './policies.mjs';
 
 const frozenCopy = value => {
@@ -23,7 +23,7 @@ export function walkForwardSplits(samples, { trainSize, validationSize, stepSize
     requireThat(available >= time, 'SAMPLE_TIME', 'Feature availability cannot precede observation');
     requireThat((last === null || time > last) && label >= time, 'SAMPLE_TIME', 'Sample times must strictly increase and labels cannot predate observations'); last = time;
   }
-  const folds = [];
+  const folds = [], finalBoundary = finalStart < samples.length ? samples[finalStart].time : null;
   for (let start = trainSize; start + validationSize <= finalStart; start += stepSize) {
     const boundary = BigInt(samples[start].time), cutoff = String(boundary > embargo ? boundary - embargo : 0n);
     const train = [], purged = [], begin = expanding ? 0 : start - trainSize;
@@ -32,8 +32,15 @@ export function walkForwardSplits(samples, { trainSize, validationSize, stepSize
       (trainingAllowed({ observationTime: row.availableAt ?? row.feature?.availableAt ?? row.time, labelAvailableAt: row.labelAvailableAt, cutoff }) ? train : purged).push(i);
     }
     requireThat(train.length > 0, 'EMPTY_TRAIN_FOLD', 'Purging/embargo removed every training example');
-    const validation = Array.from({ length: validationSize }, (_, i) => start + i);
-    const body = { id: `fold-${folds.length + 1}`, train, validation, purged, cutoff, validationStart: samples[start].time, validationEnd: samples[start + validationSize - 1].time };
+    const validation = [], validationPurged = [];
+    for (let i = start; i < start + validationSize; i++) {
+      const row = samples[i];
+      // Selection may consume forward labels only if all their information is
+      // available strictly before the first final observation.
+      (finalBoundary === null || trainingAllowed({ observationTime: row.availableAt ?? row.feature?.availableAt ?? row.time, labelAvailableAt: row.labelAvailableAt, cutoff: finalBoundary }) ? validation : validationPurged).push(i);
+    }
+    requireThat(validation.length > 0, 'EMPTY_VALIDATION_FOLD', 'Final-boundary purging removed every validation example');
+    const body = { id: `fold-${folds.length + 1}`, train, validation, purged, validationPurged, cutoff, validationStart: samples[validation[0]].time, validationEnd: samples[validation.at(-1)].time };
     folds.push({ ...body, hash: hash(body) });
   }
   requireThat(folds.length > 0, 'NO_FOLDS', 'No complete validation window fits before final holdout');

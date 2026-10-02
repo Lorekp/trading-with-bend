@@ -7,6 +7,7 @@ import { join, resolve, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 import { loadBinanceBars, loadBinanceSeries } from '../../src/binance-bars.mjs';
+import { downloadHyperliquid, monthWindow, candleCoverage, validateFunding } from '../../scripts/download-hyperliquid.mjs';
 
 const HEADER = 'open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore';
 const code = expected => error => error.code === expected;
@@ -205,4 +206,51 @@ test('downloaded September ETHUSDT archives verify, stream and resample without 
     assert.equal(auxiliary.rows.length, type === 'fundingRate' ? 90 : 43200);
     assert.equal(auxiliary.provenance.archives[0].coverage.status, type === 'fundingRate' ? 'observed-only' : 'complete-declared-calendar-period');
   }
+});
+
+test('matching Hyperliquid acquisition preserves raw evidence, paginates funding and exposes missing execution data', async t => {
+  const input = fixture(t, csv());
+  input.manifest.month = '2024-09';
+  writeFileSync(input.manifestPath, JSON.stringify(input.manifest));
+  const root = join(dirname(input.manifestPath), 'hyperliquid'), window = monthWindow('2024-09');
+  const funding = Array.from({ length: 720 }, (_, index) => ({ coin: 'ETH', time: window.startTime + index * 3_600_000, fundingRate: '-0.00001', premium: '0.00002' }));
+  const requests = [];
+  const result = await downloadHyperliquid({ binanceManifest: input.manifestPath, root, request: async body => {
+    requests.push(body);
+    if (body.type === 'fundingHistory') return JSON.stringify(funding.filter(row => row.time >= body.startTime).slice(0, 500));
+    if (body.type === 'metaAndAssetCtxs') return JSON.stringify([{ universe: [{ name: 'ETH', szDecimals: 4 }] }, [{ markPx: '2000' }]]);
+    const intervalMs = { '1m': 60_000, '5m': 300_000, '15m': 900_000 }[body.req.interval];
+    const count = body.req.interval === '15m' ? 2880 : 2;
+    return JSON.stringify(Array.from({ length: count }, (_, index) => {
+      const time = window.endTimeExclusive - (count - index) * intervalMs;
+      return { s: 'ETH', i: body.req.interval, t: time, T: time + intervalMs - 1, o: '2000.1', h: '2001', l: '1999', c: '2000', v: '0.0001', n: 1 };
+    }));
+  } });
+  assert.equal(result.role, 'execution'); assert.equal(result.informationSource.role, 'information');
+  assert.equal(result.informationSource.manifestSha256, sha(readFileSync(input.manifestPath)));
+  assert.equal(result.complete, false); assert.equal(result.executionReady, false);
+  assert.equal(result.datasets.find(dataset => dataset.interval === '1m').missingRanges[0].rows, 43198);
+  assert.equal(result.datasets.find(dataset => dataset.interval === '15m').status, 'complete');
+  const rates = result.datasets.find(dataset => dataset.type === 'fundingHistory');
+  assert.equal(rates.status, 'complete'); assert.equal(rates.rows, 720); assert.equal(rates.pages.length, 3);
+  assert.deepEqual(requests.filter(request => request.type === 'fundingHistory').map(request => request.startTime), [window.startTime, funding[499].time + 1, funding[719].time + 1]);
+  assert.equal(result.datasets.find(dataset => dataset.type === 'metaAndAssetCtxs').historical, false);
+  assert.equal(result.datasets.find(dataset => dataset.type === 'l2Book').status, 'not-downloaded');
+  for (const dataset of result.datasets) for (const artifact of [dataset.raw, dataset.csv, dataset.json, ...(dataset.pages ?? [])].filter(Boolean)) {
+    const bytes = readFileSync(join(root, artifact.path));
+    assert.equal(bytes.length, artifact.bytes); assert.equal(sha(bytes), artifact.sha256);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'manifest.json'))), result);
+});
+
+test('Hyperliquid coverage rejects wrong markets, duplicates and malformed bars and never hides missing funding hours', () => {
+  const window = { startTime: 0, endTimeExclusive: 120_000, coin: 'ETH', interval: '1m', intervalMs: 60_000 };
+  const candle = { s: 'ETH', i: '1m', t: 0, T: 59_999, o: '2', h: '3', l: '1', c: '2', v: '0', n: 0 };
+  assert.equal(candleCoverage([candle], window).status, 'partial');
+  assert.throws(() => candleCoverage([candle, candle], window), /Duplicate/);
+  assert.throws(() => candleCoverage([{ ...candle, s: 'BTC' }], window), /mismatch/);
+  assert.throws(() => candleCoverage([{ ...candle, T: 60_000 }], window), /timestamps/);
+  assert.throws(() => candleCoverage([{ ...candle, h: '1' }], window), /OHLCV/);
+  const coverage = validateFunding([{ coin: 'ETH', time: 0, fundingRate: '1e-5', premium: '-1e-5' }], { coin: 'ETH', startTime: 0, endTimeExclusive: 7_200_000 });
+  assert.equal(coverage.status, 'partial'); assert.deepEqual(coverage.missingHours, [3_600_000]);
 });

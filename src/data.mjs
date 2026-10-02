@@ -1,4 +1,4 @@
-import { MAX_NAT, nat, requireThat } from './framework.mjs';
+import { MAX_NAT, nat, requireThat } from './core.mjs';
 
 export const QUOTE_UNITS = Object.freeze({ time: 'ms', price: 'quote-minor-per-lot', quantity: 'lots' });
 const quoteFields = ['time', 'sourceTime', 'sequence', 'bid', 'ask', 'bidLots', 'askLots'];

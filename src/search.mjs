@@ -1,4 +1,4 @@
-import { hash, requireThat } from './framework.mjs';
+import { hash, requireThat } from './core.mjs';
 import { canonicalExperimentJson, deterministicSeed } from './experiments.mjs';
 
 /** Stable Cartesian product, bounded before allocation. No implicit random search. */

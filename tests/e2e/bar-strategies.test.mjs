@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBarStrategy } from '../../src/bar-strategies.mjs';
-import { runBarStrategy } from '../../src/bar-replay.mjs';
+import { InformationSource } from '../../src/information-source.mjs';
+import { QuoteExecutionVenue } from '../../src/execution-venue.mjs';
+import { runBarStrategy as runSeparateBars } from '../../src/bar-replay.mjs';
+import { replayBars as runBarStrategy } from '../replay-fixtures.mjs';
 
 const freeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); } return value; };
 const config = () => ({ instrument: { symbol: 'ETHUSDT', currency: 'USDT', lotSize: '0.001', priceTick: '1' }, initialCash: '1000000', feePerLot: '1', orderLatencyMs: '0', cancelLatencyMs: '0', maxQuoteAgeMs: '1000', manifest: { datasetVersion: 'synthetic-e2e-only', strategyArtifact: 'bar-strategy-test', evaluationProtocol: 'fixed-fixture', seed: '1' } });
@@ -175,4 +178,29 @@ test('real bridge replay retains complete immutable model/scaler artifacts match
   const unrecordedReport = runBarStrategy(config(), mlBars(50), unrecorded, { maxPositionLots: '10', halfSpreadBps: '0' }).report();
   assert.deepEqual(unrecorded.modelArtifacts(), []); assert.equal(unrecordedReport.barReplay.strategyDiagnostics.recordModels, false);
   assert.equal(unrecordedReport.barReplay.targetsHash, report.barReplay.targetsHash);
+});
+
+test('delayed bar publication clocks labels, training and deployment from actual availability', () => {
+  const input = bars(Array.from({ length: 45 }, (_, i) => 1000 + i), { interval: 100 });
+  const observations = input.map((bar, i) => ({ time: bar.closeTime, availableAt: String(10000 + i), data: bar }));
+  const source = new InformationSource({ id: 'delayed-bars', instrument: config().instrument, observations });
+  const venue = new QuoteExecutionVenue({ id: 'empty-venue', config: config(), ticks: [], maxPositionLots: '10' });
+  const strategy = createBarStrategy({ ...mlSpec, featureWindow: 2, trainingWindow: 4, minTrain: 2,
+    retrainEvery: 1, trainingTimeMs: '10', deploymentDelayMs: '10' });
+  const targets = [];
+  const report = runSeparateBars(source, venue, { ...strategy, onBar(context) {
+    const target = strategy.onBar(context); targets.push({ time: context.time, target }); return target;
+  } }).report();
+  const { fits, lastPrediction } = report.barReplay.strategyDiagnostics;
+  assert.ok(fits.length > 0);
+  for (const fit of fits) {
+    assert.ok(BigInt(fit.trainingStartedAt) >= 10000n);
+    assert.ok(BigInt(fit.lastLabelAvailableAt) >= 10000n);
+    assert.ok(BigInt(fit.lastLabelAvailableAt) < BigInt(fit.cutoff));
+    assert.equal(BigInt(fit.deployedAt) - BigInt(fit.trainingStartedAt), 20n);
+  }
+  const firstTarget = targets.find(item => item.target !== null);
+  assert.ok(firstTarget);
+  assert.ok(BigInt(firstTarget.time) >= BigInt(fits[0].deployedAt));
+  assert.equal(lastPrediction.decisionTime, observations.at(-1).availableAt);
 });

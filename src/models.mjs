@@ -1,4 +1,4 @@
-import { hash, nat, requireThat } from './framework.mjs';
+import { hash, nat, requireThat } from './core.mjs';
 import { featureSchema, validateFeatureArtifact } from './features.mjs';
 import { modelReady, trainingAllowed } from './policies.mjs';
 import { populationMoments, rootMeanSquare, stableMean } from './numerics.mjs';

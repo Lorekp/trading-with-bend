@@ -1,8 +1,9 @@
 # Shared research toolkit
 
 This toolkit supplies shared infrastructure for independent experiment agents.
-Rule strategies, ML predictions and externally generated orders use the same
-cash-spot execution/accounting model when they call `Backtest` or `runStrategy`.
+Rule strategies and ML predictions emit target positions through independently
+supplied information and execution adapters. The shipped execution venues and
+low-level `Backtest` use the Bend cash model. See [ADAPTERS.md](ADAPTERS.md).
 A queue worker can also call another simulator, but its results then have that
 simulator's verification boundary; the Bend proof claim does not transfer to it.
 
@@ -32,10 +33,14 @@ Intentional identity collisions fail rather than silently replacing old evidence
 
 | Module | Reusable tools |
 | --- | --- |
-| `src/framework.mjs` | Exact event replay, ledger, fills, checkpoints, frozen history callbacks |
+| `src/core.mjs` | Pure integer validation, immutable views, errors, hashing and JSON; no compiled runtime required |
+| `src/provenance.mjs` | Source snapshots shared by replay and experiment verification |
+| `src/framework.mjs` | Exact event replay, ledger, fills and checkpoints |
+| `src/information-source.mjs`, `src/replay.mjs` | Information observations and independent source/venue composition |
+| `src/execution-venue.mjs`, `src/bar-execution-venue.mjs` | Venue-owned quote/bar execution, costs, liquidity and valuation |
 | `src/policies.mjs` | Bend-backed lot caps, data-role gates, label cutoff and deployment checks; exact affordable-lot division |
 | `src/data.mjs` | Strict quote CSV ingestion, explicit units, chronology checks, deterministic synthetic fixtures |
-| `src/strategies.mjs` | Target-position execution adapter, buy-and-hold, moving-average crossover, mean reversion |
+| `src/strategies.mjs` | Target-position signals, buy-and-hold, moving-average crossover, mean reversion |
 | `src/features.mjs` | Schema-bound trailing value/lag/mean/std/return features, batch/stream parity, warmup/missingness checks |
 | `src/models.mjs` | Training-only standardization, ridge/OLS baseline, model/feature lineage, checked predictions and regression metrics |
 | `src/sequence-data.mjs`, `src/forecast.mjs` | Regular sequence/label construction, optional Python model adapters, portable weights and checked return forecasts; see [FORECASTING.md](FORECASTING.md) |
@@ -98,6 +103,31 @@ host. PID reuse conservatively blocks recovery. Failed/completed jobs are never
 automatically rerun; use a new key for a deliberate new trial. Recovery preserves
 abandoned attempt records and advances the claim generation without deleting it.
 
+`runExperiment` from `src/experiments.mjs` executes synchronous work using the
+same immutable manifests, ownership claims, attempts, results and artifact
+inventories as queued workers. Its callback receives `(configuration, context)`;
+the configuration is a copy, and context supplies the same `key`, `seed`,
+`attemptId`, `outputDirectory` and `writeArtifact` as a worker. It returns
+`{ id, result }`, with `id` usable as the key for `readExperimentResult`,
+`verifyExperimentArtifacts` and `recoverExperiment`. Results must be finite,
+acyclic JSON. Use a queued worker for asynchronous work. Inline closure state
+and external dependencies are caller-owned and cannot be reconstructed from
+the manifest; the configuration must record the inputs needed to repeat a trial.
+
+`listExperiments` and the `status` CLI read one population for both execution
+modes, including running, failed and abandoned trials. Recovery checks recorded
+process ownership in either mode. A dead inline owner's attempt becomes
+`abandoned`; it is never queued because its callback exists only in memory.
+Register a fresh inline trial to repeat it. Worker recovery still authorizes a
+new attempt under the existing immutable specification.
+
+The registry format is now version 2. Start a new registry for this toolkit
+version; preserve older registries with their original checkout for inspection.
+The root-level UUID record format and its special listing path have been removed.
+CLI raw-input hashes and parsed input metadata are immutable attempt artifacts;
+the full report is also retained as the verified result, independently of any
+`--out` export.
+
 Workers pin their entrypoint, declared dependencies, toolkit source/build hashes,
 Node version and platform. Declare helper modules and datasets outside `src` as
 dependencies; arbitrary transitive imports cannot be inferred reliably. The
@@ -111,18 +141,32 @@ clean up any subprocesses it launches.
 
 ## Rules and prediction-to-order execution
 
-`targetPosition(target, {feePerLot,maxPositionLots,warmup})` turns a target lot
-count into ordinary limit decisions. `target` is a decimal string or a callback
-of `{history,ledger,orders}` returning one. It accounts for actual holdings and
-working orders, cancels stale/conflicting orders and waits for cancellation
-before replacement. It does not stack another order while one is working.
-In-flight orders may still execute during cancellation latency.
+`targetPosition(target, {maxPositionLots,warmup})` emits a target lot count or
+explicit `null`. `target` is a decimal string or a callback of the frozen strategy
+context. Built-in strategies require no venue fee configuration. `runStrategy`
+accepts an InformationSource and ExecutionVenue separately; callbacks cannot
+return submit/cancel orders.
 
-`buyAndHold`, `movingAverageCrossover` and `meanReversion` wrap this adapter.
-Use `feePerLot` matching the engine config. `maxPositionLots` is mandatory on the
-target adapter and defaults to `quantity` for the built-ins. Changing a cap cannot
-undo already executed fills or guarantee liquidation; it controls new decisions.
-Future-timestamp fills remain prohibited by the engine's existing contract.
+The venue turns intent into feasible orders using its own prices, fees, liquidity,
+capital and position cap. It cancels stale/conflicting orders, waits for effective
+cancellation, and avoids stacking exposure. In-flight orders can still execute
+during cancellation latency. Changing a cap cannot undo executed fills or
+guarantee liquidation. Fee, funding, margin and PnL assumptions belong exclusively
+to the selected venue. Source prices and volume are used only for signals.
+
+Quote callbacks receive working orders only. Full order and fill audit records
+remain available on the venue's backtest and in its reports and checkpoints.
+Built-in quote strategies declare their minimum history as `strategy.lookback`.
+`runStrategy` rejects an explicit `lookback` smaller than that requirement before
+reading any quotes. Custom callbacks can declare the same property. Omitting
+the replay's `lookback` preserves complete history; use `tickCount` for elapsed
+observations when requesting bounded history.
+
+For build-independent data preparation, import `data.mjs`, `features.mjs`,
+`numerics.mjs`, `search.mjs` or `core.mjs` directly. Registry inspection also
+works without a build; enqueueing and executing experiments still require valid
+runtime evidence. `index.mjs` exports the complete toolkit, including Bend-backed
+modules, and requires a build.
 
 ## Data and features
 
@@ -166,7 +210,10 @@ feature's `availableAt` controls delayed feature availability. The explicit
 `finalStart` index reserves an untouched final tail. Training uses only rows whose
 features and mature labels are strictly earlier than validation start minus the
 embargo. Label maturity is checked per example rather than approximated by a gap.
-Validation windows do not overlap. Empty purged folds are errors.
+Validation labels and features must also be available strictly before the first
+final observation; excluded indices are recorded in each fold's
+`validationPurged`. Validation windows do not overlap. Empty purged training or
+validation folds are errors.
 
 Use `foldRows(samples,plan,foldId,'train','train')` for fitting and
 `foldRows(...,'select','validation')` for selection. It verifies the dataset hash

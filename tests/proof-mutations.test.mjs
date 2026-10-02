@@ -9,6 +9,7 @@ test('Bend specification gate rejects deliberate accounting, cap and leakage reg
   const parent = resolve('build'), directory = join(parent, `proof-mutation-${randomUUID()}`);
   mkdirSync(directory);
   const mutations = [
+    ['bend/Engine.bend', 'Nat.mul(quantity, Nat.add(price, fee))', 'Nat.mul(quantity, price)', 'buy_updates_ledger_exactly'],
     ['bend/Engine.bend', 'Nat.sub(cash, cost(price, lots, fee))', 'Nat.sub(cash, Nat.mul(price, lots))', 'buy_updates_ledger_exactly'],
     ['bend/Policy.bend', 'Nat.min(requested, Nat.min(capital, position))', 'requested', 'capped_lots_respects_all_limits'],
     ['bend/Policy.bend', 'case Select{} Holdout{}:\n      False{}', 'case Select{} Holdout{}:\n      True{}', 'selection_cannot_read_final'],
@@ -46,7 +47,7 @@ test('Bend specification gate rejects deliberate accounting, cap and leakage reg
       else if (process.platform === 'win32') {
         command = 'wsl';
         const wslPath = input.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`);
-        args = ['-d', 'Ubuntu-24.04', '--', './.tools/bun-linux-x64/bun', '.tools/bend/bend2/main.ts', wslPath, '--check-only'];
+        args = ['-d', process.env.BEND_WSL_DISTRO || 'Ubuntu-24.04', '--', './.tools/bun-linux-x64/bun', '.tools/bend/bend2/main.ts', wslPath, '--check-only'];
       } else { command = resolve('.tools/bun-linux-x64/bun'); args = ['.tools/bend/bend2/main.ts', input, '--check-only']; }
       const result = spawnSync(command, args, { encoding: 'utf8', timeout: 25000 });
       assert.ifError(result.error);

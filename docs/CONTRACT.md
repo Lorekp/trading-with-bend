@@ -43,6 +43,18 @@ The admission law concerns its successful branch; it does **not** prove the risk
 
 ## Checkpoints and provenance
 
+The host uses one build-evidence gate for the engine, research policies, archive
+admission and experiment registration. Evidence must cover every checked source
+and generated module. Standalone training, split and archive calls verify the
+loaded runtime before their first Bend operation; they do not depend on creating
+a backtest or queue first. Subsequent policy calls reuse that verified snapshot.
+New backtests, archive loads and experiment admission/completion recheck disk
+freshness. Existing runs retain their original implementation and evidence;
+changing or rebuilding sources requires a fresh process for new work.
+
+Pure data, feature, numerical and grid helpers, along with registry readers,
+remain usable without generated Bend modules or repository metadata.
+
 Checkpoints contain configuration, all accepted unique input events, failed-input audit records, source hashes and a checksum. Restoring replays the full prefix, reconstructing orders, outstanding cancel requests, reservations, duplicate detection, valuations and trace. This is exact and portable JSON, with O(history) restoration rather than a fast binary snapshot. Source mismatch or checksum mismatch rejects restore. No RNG state exists in the pure engine. Stateful strategy callbacks must persist their own state and are not part of these engine checkpoints.
 
 Reports include dataset/config/source hashes, toolchain, runtime, strategy and protocol identifiers, assumptions, trace and a trace hash. The full dataset and generated report should be retained together. Supplied identifiers do not prove that external model training, universe construction or strategy selection was reproducible. Build hashes prevent accidental stale-check claims; they are not signatures against malicious editing.
@@ -53,7 +65,7 @@ Reports include dataset/config/source hashes, toolchain, runtime, strategy and p
 
 `EvaluationSession` fixes a protocol and strategy hash and rejects training/selection access to final partitions through Bend's role policy; final access is single-use within that session. The newer `withFinalHoldout` adds a persistent cross-process claim for a dataset plus holdout ID, consumed even on failure. Both remain cooperative helpers, not sandboxes against direct reads or another holdout identity. `gridJobs` provides validation-only parameter search; no reinforcement-learning reward layer is shipped.
 
-`runExperiment` creates a unique on-disk record before executing work, then records completion or failure. An interrupted run remains `running` for audit. CLI trials additionally save raw-input hashes, full configuration and dataset hashes as soon as available. Every CLI run uses it; direct low-level API calls must be wrapped explicitly. The registry cannot attest to experiments conducted outside it.
+`runExperiment` registers an immutable manifest and owned attempt before executing work, then publishes its result and artifact inventory or failure through the same registry as queued workers. An interrupted run remains `running` until explicit recovery checks that its owner has exited and marks it `abandoned`. Inline callbacks cannot be restored; repeating one requires a new trial. CLI trials save raw-input hashes, full configuration and dataset hashes as immutable artifacts as soon as available. Every CLI run uses it; direct low-level API calls must be wrapped explicitly. The registry cannot attest to experiments conducted outside it or reconstruct arbitrary inline closure state.
 
 ## Shared policy additions
 
@@ -84,8 +96,11 @@ theorems. Proof mutation tests require broken implementations to be rejected by
 the relevant specification, including a predicate that prohibits every bar fill
 and a filter that fabricates an order from an empty list.
 
-`orderStorage: 'active'` changes internal storage only; public final orders and
-the full state retain the audit history. `traceMode: 'compact'` omits order arrays
+`orderStorage: 'active'` is the default: only working orders enter Bend matching
+and reservation scans; public final orders and the full state retain the audit
+history. Explicit `orderStorage: 'all'` is a bounded reference mode for equivalence
+tests, not long campaigns: historical-order scans can exceed the backend stack.
+`traceMode: 'compact'` omits order arrays
 from each trace sample and therefore intentionally changes the trace hash.
 Comparisons use the same trace mode. Checkpoints record these options and still
 replay all accepted events; they do not capture stateful bar-strategy models.

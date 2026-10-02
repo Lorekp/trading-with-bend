@@ -1,4 +1,4 @@
-import { requireThat } from './framework.mjs';
+import { requireThat } from './core.mjs';
 
 function samples(values) {
   requireThat(Array.isArray(values) && values.length > 0, 'NUMERICAL_INPUT', 'A nonempty numeric array is required');

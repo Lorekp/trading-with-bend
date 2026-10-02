@@ -1,11 +1,11 @@
+import { replayQuotes as runStrategy } from './replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import Engine from '../build/engine.mjs';
-import { Backtest, BacktestError, MAX_NAT, orders, runStrategy, hash, json } from '../src/framework.mjs';
-import { validateModelArtifact, EvaluationSession, runExperiment } from '../src/research.mjs';
+import { Backtest, orders } from '../src/framework.mjs';
+import { BacktestError, MAX_NAT, hash, json } from '../src/core.mjs';
+import { validateModelArtifact, EvaluationSession } from '../src/research.mjs';
 
 const demo = JSON.parse(readFileSync(new URL('../examples/demo.json', import.meta.url), 'utf8'));
 const config = (extra = {}) => ({ ...structuredClone(demo.config), initialCash: '1000', feePerLot: '1', ...extra });
@@ -142,10 +142,22 @@ test('strategy receives immutable prefixes and decisions cannot fill on observed
   const run = runStrategy(config({ orderLatencyMs: '0' }), [tick(1), tick(2)], view => {
     observed.push(view.history.length);
     assert.throws(() => view.history.push({}), TypeError);
-    return view.history.length === 1 ? [{ type: 'submit', side: 'buy', quantity: '1', limit: '100' }] : [];
+    return view.history.length === 1 ? '1' : null;
   });
   assert.deepEqual(observed, [1, 2]); assert.equal(run.fills[0].executionTime, 2n);
 });
+test('strategy validates source sequences before assigning internal event sequences', () => {
+  for (const sequence of ['9', '10', undefined, 'invalid']) {
+    const quotes = [tick(1, '1', '100', '99', '10'), { ...tick(1), id: 'second', sequence }];
+    assert.throws(() => runStrategy(config(), quotes, () => assert.fail('Invalid source must be rejected before strategy evaluation')), { code: sequence === '9' || sequence === '10' ? 'OUT_OF_ORDER' : 'INVALID_INTEGER' });
+  }
+  const quotes = [tick(1, '1', '100', '99', '10'), { ...tick(1, '1', '100', '99', '20'), id: 'second' }];
+  const run = runStrategy(config(), quotes, ({ tickCount }) => tickCount === 1 ? '1' : null);
+  assert.equal(run.options.orderStorage, 'active');
+  assert.deepEqual(run.events.map(event => event.sequence), ['1', '2', '3']);
+  assert.equal(run.fills.length, 0);
+});
+
 test('generated ledger functions match independent BigInt arithmetic over many inputs', () => {
   let random = 98765n;
   const next = max => { random = (random * 48271n) % 2147483647n; return random % max; };
@@ -193,11 +205,4 @@ test('selection cannot authorize final data, final protocol is fixed and single-
   assert.throws(() => session.authorize('final', 'final', hash('changed')), code('STRATEGY_CHANGED'));
   session.authorize('final', 'final', digest);
   assert.throws(() => session.authorize('final', 'final', digest), code('FINAL_TEST_REUSE'));
-});
-test('experiment registry records successful and failed work', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'bend-experiments-'));
-  runExperiment(directory, { a: 1 }, () => ({ value: 42 }));
-  assert.throws(() => runExperiment(directory, { a: 2 }, () => { throw new Error('failed training'); }));
-  const records = readdirSync(directory).map(file => JSON.parse(readFileSync(join(directory, file), 'utf8')));
-  assert.deepEqual(records.map(r => r.status).sort(), ['completed', 'failed']);
 });

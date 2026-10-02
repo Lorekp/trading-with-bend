@@ -1,4 +1,4 @@
-import { checked, hash, nat, requireThat } from './framework.mjs';
+import { checked, hash, nat, requireThat } from './core.mjs';
 import { RollingFeatures } from './features.mjs';
 import { fitRidge, predictRidge } from './models.mjs';
 import { cappedLots } from './policies.mjs';
@@ -22,6 +22,7 @@ function validateContext(context) {
   for (const key of ['openTime', 'closeTime', 'availableAt', 'open', 'high', 'low', 'close', 'volumeLots']) nat(bar[key], `bar.${key}`, ['open', 'high', 'low', 'close'].includes(key));
   requireThat(BigInt(bar.openTime) <= BigInt(bar.closeTime) && BigInt(bar.availableAt) === BigInt(bar.closeTime) + 1n, 'STRATEGY_CONTEXT', 'Completed bar availability must be closeTime + 1');
   requireThat(context.history.at(-1).closeTime === bar.closeTime && context.history.at(-1).close === bar.close, 'STRATEGY_CONTEXT', 'History must end with the current completed bar');
+  requireThat(nat(context.time, 'decision time') >= BigInt(bar.availableAt), 'STRATEGY_CONTEXT', 'Decision time cannot precede completed bar availability');
   stateNat(context.ledger.cash, 'ledger.cash'); stateNat(context.ledger.quantity, 'ledger.quantity');
   size(context.index, 'index', 0);
 }
@@ -66,7 +67,7 @@ export function createBarStrategy(spec) {
     lookback = Math.max(entryWindow + 1, exitWindow + 1, atrWindow + 1, trendWindow);
     let previousPosition = 0n, peak = null, exitPending = false, cooldownUntil = -1, entryTarget = 0n;
     Object.assign(diagnostics, { entries: 0, exits: 0, filledEntries: 0, filledExits: 0, trailingExits: 0, channelExits: 0, cooldownBlocks: 0, zeroVolatilityBars: 0 });
-    decide = ({ bar, history, ledger, index }) => {
+    decide = ({ bar, history, ledger, equity, index }) => {
       const position = stateNat(ledger.quantity, 'ledger.quantity'), close = BigInt(bar.close);
       if (previousPosition > 0n && position === 0n) {
         peak = null; exitPending = false; entryTarget = 0n; cooldownUntil = index + cooldownBars; diagnostics.filledExits++;
@@ -85,8 +86,9 @@ export function createBarStrategy(spec) {
       });
       const atrSum = sum(trueRanges);
       if (atrSum === 0n) { diagnostics.zeroVolatilityBars++; return position > 0n ? String(position) : '0'; }
-      const equity = stateNat(ledger.cash, 'ledger.cash') + position * close;
-      const riskLots = equity * riskBps * BigInt(atrWindow) / (10000n * atrSum * trailingAtr);
+      // Account valuation comes exclusively from the execution venue.
+      if (equity === null) return null;
+      const riskLots = stateNat(equity, 'equity') * riskBps * BigInt(atrWindow) / (10000n * atrSum * trailingAtr);
       const capped = BigInt(cappedLots(spec.quantity, spec.quantity, String(minimum(riskLots, BigInt(spec.quantity)))));
       if (position > 0n) {
         if (exitPending) return '0';
@@ -130,13 +132,14 @@ export function createBarStrategy(spec) {
     let previousClose = null, previousFeature = null, previousPrediction = null, active = null, pending = null, lastFitIndex = -Infinity;
     let squaredError = 0, absoluteError = 0;
     Object.assign(diagnostics, { schema, fits: [], recordModels, predictions: 0, labeledPredictions: 0, predictionHashChain: hash('walkforward-predictions-v1'), lastPrediction: null, waitingForDeploymentBars: 0, mse: null, mae: null });
-    decide = ({ bar, ledger, index }) => {
-      const close = Number(BigInt(bar.close)), now = BigInt(bar.availableAt);
+    decide = ({ bar, ledger, index, time }) => {
+      // The source may publish a completed bar after its nominal availability.
+      const close = Number(BigInt(bar.close)), now = BigInt(time);
       if (previousClose === null) { previousClose = close; diagnostics.warmupBars++; return null; }
       const realized = close / previousClose - 1;
       requireThat(Number.isFinite(realized), 'NONFINITE_FEATURE', 'Bar return must be finite');
       if (previousFeature?.ready) {
-        matured.push({ id: `bar-${previousFeature.time}`, partition: 'train', feature: previousFeature, target: realized, labelAvailableAt: bar.availableAt });
+        matured.push({ id: `bar-${previousFeature.time}`, partition: 'train', feature: previousFeature, target: realized, labelAvailableAt: time });
         if (matured.length > trainingWindow + 1) matured.shift();
       }
       if (previousPrediction) {
@@ -145,14 +148,14 @@ export function createBarStrategy(spec) {
         requireThat(Number.isFinite(squaredError) && Number.isFinite(absoluteError), 'NONFINITE_MODEL', 'Prequential prediction errors exceed the supported finite numeric range');
         diagnostics.mse = squaredError / diagnostics.labeledPredictions; diagnostics.mae = absoluteError / diagnostics.labeledPredictions;
       }
-      const feature = features.update({ time: bar.closeTime, availableAt: bar.availableAt, values: { close, return: realized } });
+      const feature = features.update({ time: bar.closeTime, availableAt: time, values: { close, return: realized } });
       previousClose = close; previousFeature = feature; previousPrediction = null;
       if (pending && BigInt(pending.model.deployedAt) <= now) { active = pending; pending = null; }
       const rows = matured.filter(row => BigInt(row.labelAvailableAt) < now).slice(-trainingWindow);
       if (feature.ready && !pending && rows.length >= minTrain && index - lastFitIndex >= retrainEvery) {
-        const fold = `walkforward-${diagnostics.fits.length + 1}-${bar.availableAt}`;
+        const fold = `walkforward-${diagnostics.fits.length + 1}-${time}`;
         const completed = checked(now + trainingTime, 'training completion'), deployed = checked(completed + deploymentDelay, 'model deployment');
-        const model = fitRidge({ rows, schema, fold, cutoff: bar.availableAt, trainingStartedAt: bar.availableAt, trainingCompletedAt: String(completed), deployedAt: String(deployed), alpha });
+        const model = fitRidge({ rows, schema, fold, cutoff: time, trainingStartedAt: time, trainingCompletedAt: String(completed), deployedAt: String(deployed), alpha });
         if (recordModels) modelArtifacts.push(model);
         pending = { model, fold }; lastFitIndex = index;
         diagnostics.fits.push({ fold, modelHash: model.hash, preprocessingHash: model.preprocessingHash, trainingDataHash: model.trainingDataHash, rowCount: rows.length,
@@ -162,7 +165,7 @@ export function createBarStrategy(spec) {
       }
       if (!feature.ready) { diagnostics.warmupBars++; return null; }
       if (!active) { diagnostics.waitingForDeploymentBars++; return null; }
-      const prediction = predictRidge({ model: active.model, feature, schema, fold: active.fold, decisionTime: bar.availableAt });
+      const prediction = predictRidge({ model: active.model, feature, schema, fold: active.fold, decisionTime: time });
       previousPrediction = prediction; diagnostics.predictions++;
       diagnostics.predictionHashChain = hash({ previous: diagnostics.predictionHashChain, predictionHash: prediction.hash });
       diagnostics.lastPrediction = { ...prediction, modelDeployedAt: active.model.deployedAt, trainingCutoff: active.model.trainingCutoff };

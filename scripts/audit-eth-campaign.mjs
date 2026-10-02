@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { listExperiments, readExperimentResult } from '../src/experiments.mjs';
-import { hash } from '../src/framework.mjs';
+import { hash } from '../src/core.mjs';
 import { validateRidgeModel } from '../src/models.mjs';
 
 const root = resolve(process.argv[2] || 'output/eth-september-verified-v03');

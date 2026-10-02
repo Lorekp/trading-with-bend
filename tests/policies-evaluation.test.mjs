@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { cappedLots, affordableLots, trainingAllowed, canReadPartition, modelReady } from '../src/policies.mjs';
 import { walkForwardSplits, foldRows, withFinalHoldout, regularReturns, comparisonTable } from '../src/evaluation.mjs';
-import { Backtest, hash, MAX_NAT } from '../src/framework.mjs';
+import { Backtest } from '../src/framework.mjs';
+import { hash, MAX_NAT } from '../src/core.mjs';
 
 const samples = Array.from({ length: 16 }, (_, i) => ({ id: `s${i}`, time: String(10 * i), labelAvailableAt: String(10 * i + 15), value: i }));
 const options = { trainSize: 5, validationSize: 2, finalStart: 13, embargoMs: '5' };
@@ -47,6 +48,20 @@ test('persistent holdout release remains consumed when evaluation fails', async 
   const input = { holdoutId: 'untouched-v1', strategyHash: hash('strategy'), protocol: { metric: 'net-pnl' }, samples, plan };
   await assert.rejects(withFinalHoldout(root, input, rows => { assert.equal(rows.length, 3); throw new Error('intentional'); }), /intentional/);
   await assert.rejects(withFinalHoldout(root, { ...input, strategyHash: hash('changed') }, () => 1), { code: 'FINAL_TEST_REUSE' });
+});
+
+test('validation excludes labels and features reaching the final boundary', () => {
+  for (const maturity of ['130', '135']) {
+    const rows = structuredClone(samples); rows[12].labelAvailableAt = maturity;
+    const plan = walkForwardSplits(rows, options), last = plan.folds.at(-1);
+    assert.deepEqual(last.validation, [11]);
+    assert.deepEqual(last.validationPurged, [12]);
+    assert.deepEqual(foldRows(rows, plan, last.id, 'select', 'validation').map(row => row.id), ['s11']);
+  }
+  const delayed = structuredClone(samples); delayed[11].availableAt = '130';
+  assert.throws(() => walkForwardSplits(delayed, options), { code: 'EMPTY_VALIDATION_FOLD' });
+  const noHoldout = walkForwardSplits(samples, { ...options, finalStart: samples.length });
+  assert.deepEqual(noHoldout.folds.at(-1).validation, [13, 14]);
 });
 test('two independent processes cannot release the same final holdout twice', async () => {
   const root = mkdtempSync(join(tmpdir(), 'bend-holdout-race-'));
