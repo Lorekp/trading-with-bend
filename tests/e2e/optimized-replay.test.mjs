@@ -3,6 +3,20 @@ import assert from 'node:assert/strict';
 import { Backtest, MAX_NAT, orders, runStrategy } from '../../src/framework.mjs';
 import { movingAverageCrossover } from '../../src/strategies.mjs';
 
+test('default storage keeps historical orders out of matching across 6000 submit/cancel cycles', () => {
+  const run = new Backtest({ ...config, cancelLatencyMs: '0' }, { traceMode: 'compact' });
+  for (let i = 0; i < 6000; i++) {
+    const common = { symbol: config.instrument.symbol, currency: config.instrument.currency, time: String(i * 2), sequence: String(i * 2), orderId: String(i + 1) };
+    run.step({ ...common, id: `submit-${i}`, type: 'submit', side: 'buy', quantity: '1', limit: '100' });
+    run.step({ ...common, id: `cancel-${i}`, type: 'cancel', time: String(i * 2 + 1), sequence: String(i * 2 + 1) });
+    assert.equal(run.workingOrders.length, 0);
+  }
+  assert.equal(run.orders.length, 6000);
+  assert.ok(run.orders.every(order => order.cancelled === 1n));
+  assert.deepEqual(run.ledger, { $: 'Ledger', cash: 1000000n, quantity: 0n });
+  assert.deepEqual(Backtest.resume(run.checkpoint()).report(), run.report());
+});
+
 test('active replay retains a readable immutable public state after thousands of completed orders', () => {
   const run = new Backtest(config, { traceMode: 'compact', orderStorage: 'active' });
   let sequence = 0;
@@ -33,7 +47,7 @@ const ticks = (count = 160) => Array.from({ length: count }, (_, i) => {
 
 // Preserve the original cloning adapter as an independent compatibility oracle.
 function legacyRunStrategy(configuration, quotes, onTick) {
-  const run = new Backtest(configuration), history = [];
+  const run = new Backtest(configuration, { orderStorage: 'all' }), history = [];
   let sequence = 0n, orderId = 0n;
   const deepFreeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(deepFreeze); Object.freeze(value); } return value; };
   for (const tick of quotes) {
@@ -137,7 +151,7 @@ test('invalid history bounds fail before any strategy callback; default still re
 });
 
 test('active engine storage retains completed-order cancellation metadata, FIFO, and every checkpoint boundary', () => {
-  const full = new Backtest(config), active = new Backtest(config, { orderStorage: 'active' });
+  const full = new Backtest(config, { orderStorage: 'all' }), active = new Backtest(config);
   const base = (id, type, time, sequence) => ({ id, type, time: String(time), sequence: String(sequence), symbol: 'ETHUSDT', currency: 'USDT' });
   const events = [
     { ...base('buy', 'submit', 0, 1), orderId: '1', side: 'buy', limit: '100', quantity: '3' },
@@ -190,7 +204,7 @@ test('random partial fills, limits, cancellations, and capital rejection match t
     let random = seed, nextId = 0;
     const pick = n => { random ^= random << 13; random ^= random >>> 17; random ^= random << 5; return (random >>> 0) % n; };
     const configuration = { ...config, initialCash: '500' };
-    const full = new Backtest(configuration), active = new Backtest(configuration, { orderStorage: 'active' });
+    const full = new Backtest(configuration, { orderStorage: 'all' }), active = new Backtest(configuration);
     for (let i = 0; i < 45; i++) {
       const event = { id: `${seed}-${i}`, time: String(i), sequence: String(i + 1), symbol: 'ETHUSDT', currency: 'USDT' };
       const kind = pick(4);
@@ -210,7 +224,7 @@ test('random partial fills, limits, cancellations, and capital rejection match t
 
 test('failed valuation cannot partially commit an archived cancellation becoming effective', () => {
   const configuration = { ...config, initialCash: String(MAX_NAT), feePerLot: '0' };
-  const full = new Backtest(configuration), active = new Backtest(configuration, { orderStorage: 'active' });
+  const full = new Backtest(configuration, { orderStorage: 'all' }), active = new Backtest(configuration);
   const base = (id, type, time, sequence) => ({ id, type, time: String(time), sequence: String(sequence), symbol: 'ETHUSDT', currency: 'USDT' });
   const events = [
     { ...base('one-lot', 'submit', 0, 1), orderId: '1', side: 'buy', limit: '1', quantity: '1' },

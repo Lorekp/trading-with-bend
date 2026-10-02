@@ -97,6 +97,12 @@ host. PID reuse conservatively blocks recovery. Failed/completed jobs are never
 automatically rerun; use a new key for a deliberate new trial. Recovery preserves
 abandoned attempt records and advances the claim generation without deleting it.
 
+`listExperiments` and the `status` CLI include synchronous `runExperiment`/backtest
+CLI trials stored as UUID records in the registry root, alongside queued jobs.
+These records have `execution: 'inline'` and one audit attempt; running and failed
+trials remain visible. Queue recovery and artifact retrieval apply to queued
+jobs, whose manifests record the worker and artifact locations.
+
 Workers pin their entrypoint, declared dependencies, toolkit source/build hashes,
 Node version and platform. Declare helper modules and datasets outside `src` as
 dependencies; arbitrary transitive imports cannot be inferred reliably. The
@@ -165,7 +171,10 @@ feature's `availableAt` controls delayed feature availability. The explicit
 `finalStart` index reserves an untouched final tail. Training uses only rows whose
 features and mature labels are strictly earlier than validation start minus the
 embargo. Label maturity is checked per example rather than approximated by a gap.
-Validation windows do not overlap. Empty purged folds are errors.
+Validation labels and features must also be available strictly before the first
+final observation; excluded indices are recorded in each fold's
+`validationPurged`. Validation windows do not overlap. Empty purged training or
+validation folds are errors.
 
 Use `foldRows(samples,plan,foldId,'train','train')` for fitting and
 `foldRows(...,'select','validation')` for selection. It verifies the dataset hash

@@ -84,8 +84,11 @@ theorems. Proof mutation tests require broken implementations to be rejected by
 the relevant specification, including a predicate that prohibits every bar fill
 and a filter that fabricates an order from an empty list.
 
-`orderStorage: 'active'` changes internal storage only; public final orders and
-the full state retain the audit history. `traceMode: 'compact'` omits order arrays
+`orderStorage: 'active'` is the default: only working orders enter Bend matching
+and reservation scans; public final orders and the full state retain the audit
+history. Explicit `orderStorage: 'all'` is a bounded reference mode for equivalence
+tests, not long campaigns: historical-order scans can exceed the backend stack.
+`traceMode: 'compact'` omits order arrays
 from each trace sample and therefore intentionally changes the trace hash.
 Comparisons use the same trace mode. Checkpoints record these options and still
 replay all accepted events; they do not capture stateful bar-strategy models.

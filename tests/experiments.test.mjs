@@ -7,8 +7,26 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalExperimentJson, deterministicSeed, enqueueExperiment, listExperiments, readExperimentResult, recoverExperiment, runQueue, verifyExperimentArtifacts, writeExperimentArtifact } from '../src/experiments.mjs';
+import { runExperiment } from '../src/research.mjs';
 
 const api = new URL('../src/experiments.mjs', import.meta.url).href;
+
+test('registry listing includes inline running, completed and failed trials alongside queued jobs', async t => {
+  const { registry, worker } = fixture(t);
+  const completed = runExperiment(registry, { trial: 'success' }, () => {
+    assert.equal(listExperiments(registry)[0].status, 'running');
+    return 42;
+  });
+  assert.throws(() => runExperiment(registry, { trial: 'failure' }, () => { throw new Error('failed trial'); }), /failed trial/);
+  enqueueExperiment(registry, { key: 'queued', configuration: {}, workerModule: worker });
+  const records = listExperiments(registry);
+  assert.equal(records.length, 3);
+  assert.deepEqual(records.map(record => record.status).sort(), ['completed', 'failed', 'queued']);
+  assert.equal(records.find(record => record.id === completed.id).attempts[0].status, 'completed');
+  const listed = await subprocess([fileURLToPath(cli), 'status', registry]).done;
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.deepEqual(JSON.parse(listed.stdout), records);
+});
 const cli = new URL('../src/experiments-cli.mjs', import.meta.url);
 function fixture(t, code = 'export default async (configuration, context) => ({ configuration, seed: context.seed });') {
   const root = mkdtempSync(join(tmpdir(), 'bend-experiments-'));

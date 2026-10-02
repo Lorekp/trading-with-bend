@@ -146,6 +146,17 @@ test('strategy receives immutable prefixes and decisions cannot fill on observed
   });
   assert.deepEqual(observed, [1, 2]); assert.equal(run.fills[0].executionTime, 2n);
 });
+test('strategy validates source sequences before assigning internal event sequences', () => {
+  for (const sequence of ['9', '10', undefined, 'invalid']) {
+    const quotes = [tick(1, '1', '100', '99', '10'), { ...tick(1), id: 'second', sequence }];
+    assert.throws(() => runStrategy(config(), quotes, () => []), { code: sequence === '9' || sequence === '10' ? 'OUT_OF_ORDER' : 'INVALID_INTEGER' });
+  }
+  const quotes = [tick(1, '1', '100', '99', '10'), { ...tick(1, '1', '100', '99', '20'), id: 'second' }];
+  const run = runStrategy(config(), quotes, ({ tickCount }) => tickCount === 1 ? [{ type: 'submit', side: 'buy', quantity: '1', limit: '100' }] : []);
+  assert.deepEqual(run.events.map(event => event.sequence), ['1', '2', '3']);
+  assert.equal(run.fills.length, 0);
+});
+
 test('generated ledger functions match independent BigInt arithmetic over many inputs', () => {
   let random = 98765n;
   const next = max => { random = (random * 48271n) % 2147483647n; return random % max; };
