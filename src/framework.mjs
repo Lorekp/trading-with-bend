@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import Engine from '../build/engine.mjs';
+import { verifyBendRuntime } from './bend-runtime.mjs';
 import { BacktestError, freeze, canonical, checked, hash, json, nat, requireThat } from './core.mjs';
-import { runtimeProvenance, sourceManifest } from './provenance.mjs';
+import { sourceManifest } from './provenance.mjs';
 
 const text = (s, name) => requireThat(typeof s === 'string' && s.length > 0, 'MISSING_FIELD', `${name} is required`);
 function keys(object, allowed, name) {
@@ -68,8 +67,8 @@ function sameOrder(left, right) {
     left.decision === right.decision && left.arrival === right.arrival && left.cancel_at.$ === right.cancel_at.$ && left.cancel_at.value === right.cancel_at.value;
 }
 function orderList(values) { return values.reduceRight((tail, head) => ({ $: 'Con', head, tail }), { $: 'Nil' }); }
-const LOADED_SOURCES = freeze(runtimeProvenance());
 export class Backtest {
+  #engine;
   #sources;
   #verification;
   #config;
@@ -119,13 +118,10 @@ export class Backtest {
     const orderStorage = options.orderStorage === undefined ? 'active' : options.orderStorage;
     requireThat(traceMode === 'full' || traceMode === 'compact', 'TRACE_MODE', 'traceMode must be full or compact');
     requireThat(orderStorage === 'all' || orderStorage === 'active', 'ORDER_STORAGE', 'orderStorage must be all or active');
-    const verification = JSON.parse(readFileSync(new URL('../build/verification.json', import.meta.url), 'utf8'));
-    const current = sourceManifest();
-    requireThat(canonical(current) === canonical(LOADED_SOURCES), 'STALE_RUNTIME', 'Source changed after module loading; restart the process');
-    requireThat(verification.compiler === 'passed' && verification.sourceHashes && Object.entries(verification.sourceHashes).every(([path, digest]) => current[path] === digest), 'STALE_BUILD', 'Run npm run build: checked source or generated engine differs from build evidence');
-    this.#sources = LOADED_SOURCES; this.#verification = freeze(verification);
+    const { engine, sources, verification } = verifyBendRuntime();
+    this.#engine = engine; this.#sources = sources; this.#verification = verification;
     this.#config = freeze(validateConfig(config));
-    this.#state = freeze(Engine.initial(BigInt(config.initialCash)));
+    this.#state = freeze(this.#engine.initial(BigInt(config.initialCash)));
     this.#orders = freeze(orders(this.#state));
     this.#options = freeze({ traceMode, orderStorage }); this.#reservations = freeze(verifyState(this.#state, this.#config));
     this.#archive = new Map(); this.#closedCancels = new Map(); this.#allOrders = null; this.#publicState = null; this.#workingOrders = null;
@@ -140,6 +136,7 @@ export class Backtest {
     }
   }
   #apply(event) {
+    const Engine = this.#engine;
     validateEvent(event, this.#config);
     const digest = hash(event);
     if (this.#seen.has(event.id)) {

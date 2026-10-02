@@ -1,14 +1,8 @@
 import { createHash } from 'node:crypto';
-import { createReadStream, readFileSync } from 'node:fs';
-import Archive from '../build/archive.mjs';
+import { createReadStream } from 'node:fs';
+import { bendRuntime } from './bend-runtime.mjs';
 
-export function checkArchiveBuild() {
-  const evidence = JSON.parse(readFileSync(new URL('../build/verification.json', import.meta.url)));
-  for (const path of ['bend/Archive.bend', 'build/archive.mjs']) {
-    const digest = createHash('sha256').update(readFileSync(new URL(`../${path}`, import.meta.url))).digest('hex');
-    if (evidence.compiler !== 'passed' || evidence.sourceHashes?.[path] !== digest) throw new Error('Archive Bend build is stale; run npm run build');
-  }
-}
+export { verifyBendRuntime as checkArchiveBuild } from './bend-runtime.mjs';
 
 export function parseChecksum(text, filename) {
   const match = /^([a-fA-F0-9]{64})[ \t]+\*?([^\r\n]+)\r?\n?$/.exec(text);
@@ -25,7 +19,7 @@ export function archiveAccepted(expected, actual, expectedBytes, actualBytes) {
   for (const value of [expectedBytes, actualBytes]) {
     if (typeof value !== 'bigint' || value < 0n || value > (1n << 48n) - 1n) throw new Error('Invalid archive size');
   }
-  return Archive.accept(words(expected), words(actual), expectedBytes, actualBytes);
+  return bendRuntime().archive.accept(words(expected), words(actual), expectedBytes, actualBytes);
 }
 
 export async function hashFile(path) {

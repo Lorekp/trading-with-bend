@@ -114,3 +114,78 @@ test('a freshly loaded runtime rejects source changes absent from build evidence
   const { Backtest } = await load(directory, 'src/framework.mjs');
   assert.throws(() => new Backtest(demo.config), hasCode('STALE_BUILD'));
 });
+
+// Exercise the real compiled runtime through its callers. No Backtest or queue
+// starts before the standalone model, split and archive workflows are checked.
+async function runtimeWorkflows(directory) {
+  const { computeFeatures } = await load(directory, 'src/features.mjs');
+  const { fitRidge, predictRidge } = await load(directory, 'src/models.mjs');
+  const { walkForwardSplits } = await load(directory, 'src/evaluation.mjs');
+  const { archiveAccepted } = await load(directory, 'src/archive.mjs');
+  const { Backtest } = await load(directory, 'src/framework.mjs');
+  const { runExperiment, listExperiments, readExperimentResult } = await load(directory, 'src/experiments.mjs');
+  const schema = [{ name: 'price', source: 'price', kind: 'value', unit: 'quote-minor-per-lot' }];
+  const features = computeFeatures([10, 11, 12].map((price, i) => ({ time: String(i), availableAt: String(i), values: { price } })), schema);
+  const rows = features.map((feature, i) => ({ id: `train-${i}`, partition: 'train', feature, target: 0.01, labelAvailableAt: String(i + 1) }));
+  const samples = Array.from({ length: 8 }, (_, i) => ({ id: `sample-${i}`, time: String(i * 10), labelAvailableAt: String(i * 10 + 1) }));
+  const registry = join(directory, 'registry');
+  return {
+    train() {
+      const model = fitRidge({ rows, schema, fold: 'standalone', cutoff: '4', trainingStartedAt: '4', trainingCompletedAt: '5', deployedAt: '5' });
+      return predictRidge({ model, schema, fold: model.fold, decisionTime: '5', feature: features[2] });
+    },
+    split: () => walkForwardSplits(samples, { trainSize: 3, validationSize: 2, finalStart: 7 }),
+    archive: () => archiveAccepted('a'.repeat(64), 'a'.repeat(64), 100n, 100n),
+    replay: () => new Backtest(demo.config).run(demo.events).report(),
+    register: () => runExperiment(registry, demo.config, () => new Backtest(demo.config).run(demo.events).report()),
+    list: () => listExperiments(registry),
+    result: key => readExperimentResult(registry, key),
+  };
+}
+
+test('standalone training, splits, archive admission and registered replay use a verified runtime', async t => {
+  const study = await runtimeWorkflows(copyProject(t));
+  assert.ok(Math.abs(study.train().prediction - 0.01) < 1e-12);
+  assert.equal(study.split().folds.length, 2);
+  assert.equal(study.archive(), true);
+  assert.equal(study.replay().performance.netPnl, '260');
+  const { id } = study.register();
+  assert.equal(study.list()[0].status, 'completed');
+  assert.deepEqual(study.result(id), study.replay());
+});
+
+for (const changed of ['failed-build', 'empty-evidence', 'missing-policy-evidence', 'bend/Policy.bend', 'build/policy.mjs', 'build/archive.mjs', 'LAWS.bend']) {
+  test(`all runtime entry paths reject ${changed} before executing work`, async t => {
+    const directory = copyProject(t);
+    if (changed.includes('/') || changed === 'LAWS.bend') appendFileSync(join(directory, changed), '\n');
+    else {
+      const path = join(directory, 'build/verification.json'), evidence = JSON.parse(readFileSync(path, 'utf8'));
+      if (changed === 'failed-build') evidence.compiler = 'not-checked';
+      else if (changed === 'empty-evidence') evidence.sourceHashes = {};
+      else delete evidence.sourceHashes['build/policy.mjs'];
+      writeFileSync(path, JSON.stringify(evidence));
+    }
+    const study = await runtimeWorkflows(directory);
+    for (const name of ['train', 'split', 'archive', 'replay', 'register']) assert.throws(study[name], hasCode('STALE_BUILD'), name);
+    assert.deepEqual(study.list(), [], 'Rejected work must not publish a manifest');
+  });
+}
+
+test('runtime changes between import and first policy use cannot acquire fresh evidence', async t => {
+  const directory = copyProject(t), study = await runtimeWorkflows(directory);
+  appendFileSync(join(directory, 'build/policy.mjs'), '\n');
+  for (const name of ['train', 'split', 'archive', 'replay', 'register']) assert.throws(study[name], hasCode('STALE_RUNTIME'), name);
+  assert.deepEqual(study.list(), []);
+});
+
+test('verified policy operations stay pinned while new execution admissions reject changed sources', async t => {
+  const directory = copyProject(t), study = await runtimeWorkflows(directory);
+  const original = study.train();
+  appendFileSync(join(directory, 'bend/Policy.bend'), '\n');
+  assert.deepEqual(study.train(), original, 'Loaded policy implementation and evidence remain paired');
+  assert.equal(study.archive(), true);
+  assert.throws(study.replay, hasCode('STALE_RUNTIME'));
+  assert.throws(study.register, hasCode('STALE_RUNTIME'));
+  const { checkArchiveBuild } = await load(directory, 'src/archive.mjs');
+  assert.throws(checkArchiveBuild, hasCode('STALE_RUNTIME'));
+});

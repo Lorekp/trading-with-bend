@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fork, spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
-import { runtimeProvenance } from './provenance.mjs';
+import { verifiedRuntimeProvenance } from './provenance.mjs';
 
 export class ExperimentError extends Error {
   constructor(code, message) { super(message); this.name = 'ExperimentError'; this.code = code; }
@@ -88,12 +88,7 @@ function validateManifest(manifest) {
 }
 
 function toolkitProvenance() {
-  const sources = runtimeProvenance();
-  const currentModules = readdirSync(new URL('./', import.meta.url)).filter(name => name.endsWith('.mjs')).map(name => `src/${name}`).sort(compare);
-  assert(canonicalExperimentJson(currentModules) === canonicalExperimentJson(Object.keys(sources).filter(path => path.startsWith('src/')).sort(compare)), 'STALE_RUNTIME', 'Toolkit module set changed after this process loaded; restart the process');
-  assert(Object.entries(sources).every(([path, hash]) => digest(readFileSync(new URL(`../${path}`, import.meta.url))) === hash), 'STALE_RUNTIME', 'Toolkit changed after this process loaded; restart before queueing or executing experiments');
-  const verification = read(fileURLToPath(new URL('../build/verification.json', import.meta.url)));
-  assert(verification.compiler === 'passed' && verification.sourceHashes && Object.keys(verification.sourceHashes).length > 0 && Object.entries(verification.sourceHashes).every(([path, hash]) => sources[path] === hash), 'STALE_BUILD', 'Build evidence differs from current sources; run npm run build');
+  const { sources, verification } = verifiedRuntimeProvenance();
   return { sources, verification, node: process.version, platform: process.platform, architecture: process.arch };
 }
 

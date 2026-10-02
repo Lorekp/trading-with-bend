@@ -43,6 +43,18 @@ The admission law concerns its successful branch; it does **not** prove the risk
 
 ## Checkpoints and provenance
 
+The host uses one build-evidence gate for the engine, research policies, archive
+admission and experiment registration. Evidence must cover every checked source
+and generated module. Standalone training, split and archive calls verify the
+loaded runtime before their first Bend operation; they do not depend on creating
+a backtest or queue first. Subsequent policy calls reuse that verified snapshot.
+New backtests, archive loads and experiment admission/completion recheck disk
+freshness. Existing runs retain their original implementation and evidence;
+changing or rebuilding sources requires a fresh process for new work.
+
+Pure data, feature, numerical and grid helpers, along with registry readers,
+remain usable without generated Bend modules or repository metadata.
+
 Checkpoints contain configuration, all accepted unique input events, failed-input audit records, source hashes and a checksum. Restoring replays the full prefix, reconstructing orders, outstanding cancel requests, reservations, duplicate detection, valuations and trace. This is exact and portable JSON, with O(history) restoration rather than a fast binary snapshot. Source mismatch or checksum mismatch rejects restore. No RNG state exists in the pure engine. Stateful strategy callbacks must persist their own state and are not part of these engine checkpoints.
 
 Reports include dataset/config/source hashes, toolchain, runtime, strategy and protocol identifiers, assumptions, trace and a trace hash. The full dataset and generated report should be retained together. Supplied identifiers do not prove that external model training, universe construction or strategy selection was reproducible. Build hashes prevent accidental stale-check claims; they are not signatures against malicious editing.
