@@ -7,7 +7,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fork, spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { runtimeProvenance } from './provenance.mjs';
-import { hash } from './core.mjs';
 
 export class ExperimentError extends Error {
   constructor(code, message) { super(message); this.name = 'ExperimentError'; this.code = code; }
@@ -68,12 +67,23 @@ export function deterministicSeed(key) {
 
 const read = path => JSON.parse(readFileSync(path, 'utf8'));
 const optionalRead = path => { try { return read(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
-const directory = (root, key) => join(resolve(root), 'jobs', digest(key));
+const directory = (root, key) => join(registryJobs(root), digest(key));
 const attemptDirectory = (jobDirectory, token) => join(jobDirectory, 'attempts', token);
+
+function registryJobs(root) {
+  const path = resolve(root);
+  let entries;
+  try { entries = readdirSync(path, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return join(path, 'jobs'); throw error; }
+  assert(!entries.some(entry => entry.isFile() && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.json$/.test(entry.name)),
+    'REGISTRY_VERSION', 'Legacy inline records require their original toolkit; use a new registry instead of mixing formats');
+  return join(path, 'jobs');
+}
 
 function validateManifest(manifest) {
   const { specificationHash, createdAt, ...specification } = manifest;
-  assert(manifest.version === 1 && digest(canonicalExperimentJson(specification)) === specificationHash && digest(canonicalExperimentJson(manifest.configuration)) === manifest.configurationHash, 'REGISTRY_CORRUPT', 'Experiment manifest does not match its immutable specification/configuration hashes');
+  assert(manifest.version === 2, 'REGISTRY_VERSION', 'Use the original toolkit to inspect this registry version, or start a new registry');
+  assert(['inline', 'worker'].includes(manifest.execution) && digest(canonicalExperimentJson(specification)) === specificationHash && digest(canonicalExperimentJson(manifest.configuration)) === manifest.configurationHash, 'REGISTRY_CORRUPT', 'Experiment manifest does not match its immutable specification/configuration hashes');
   return manifest;
 }
 
@@ -117,13 +127,17 @@ function moduleUrl(module) {
 /** Idempotently enqueue a key. Changed configuration, seed, entrypoint path,
  * or entrypoint bytes under the same key are rejected, including across agents. */
 export function enqueueExperiment(root, { key, configuration, workerModule, dependencies = [], seed = deterministicSeed(key) }) {
-  assert(typeof key === 'string' && key.length > 0 && key.length <= 1024 && !key.includes('\0'), 'INVALID_KEY', 'key must contain 1..1024 characters without null bytes');
-  assert(Number.isInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'INVALID_SEED', 'seed must be an unsigned 32-bit integer');
-  const configurationJson = canonicalExperimentJson(configuration);
   const worker = moduleUrl(workerModule);
   assert(Array.isArray(dependencies), 'DEPENDENCIES', 'dependencies must be an array of local file paths or file URLs');
   const dependencyHashes = Object.fromEntries([...new Set(dependencies.map(moduleUrl))].sort(compare).map(url => [url, digestFile(fileURLToPath(url))]));
-  const specification = { version: 1, key, configuration: JSON.parse(configurationJson), configurationHash: digest(configurationJson), workerModule: worker, workerHash: digestFile(fileURLToPath(worker)), dependencies: dependencyHashes, toolkit: toolkitProvenance(), seed };
+  return registerExperiment(root, { key, configuration, seed, execution: 'worker', workerModule: worker, workerHash: digestFile(fileURLToPath(worker)), dependencies: dependencyHashes });
+}
+
+function registerExperiment(root, { key, configuration, seed, ...execution }) {
+  assert(typeof key === 'string' && key.length > 0 && key.length <= 1024 && !key.includes('\0'), 'INVALID_KEY', 'key must contain 1..1024 characters without null bytes');
+  assert(Number.isInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'INVALID_SEED', 'seed must be an unsigned 32-bit integer');
+  const configurationJson = canonicalExperimentJson(configuration);
+  const specification = { version: 2, key, configuration: JSON.parse(configurationJson), configurationHash: digest(configurationJson), ...execution, toolkit: toolkitProvenance(), seed };
   const specificationHash = digest(canonicalExperimentJson(specification));
   const manifest = { ...specification, specificationHash, createdAt: new Date().toISOString() };
   const path = join(directory(root, key), 'manifest.json');
@@ -131,6 +145,33 @@ export function enqueueExperiment(root, { key, configuration, workerModule, depe
   const existing = validateManifest(read(path));
   assert(existing.specificationHash === specificationHash, 'EXPERIMENT_COLLISION', `Experiment key ${JSON.stringify(key)} already has a different immutable specification`);
   return existing;
+}
+
+/** Execute synchronous work with the same durable attempt and context as workers.
+ * The callback receives (configuration, context); its closure is not resumable. */
+export function runExperiment(root, configuration, work) {
+  assert(typeof work === 'function', 'EXPERIMENT_CALLBACK', 'Expected a synchronous experiment callback');
+  const id = randomUUID(), token = randomUUID();
+  // Publish ownership first so a visible inline manifest can never be ownerless.
+  // An interruption before the manifest leaves an ignored unpublished directory.
+  const owned = claimAttempt(directory(root, id), token, process.pid, 0);
+  assert(owned, 'EXPERIMENT_COLLISION', 'Inline experiment identity is already claimed');
+  const manifest = registerExperiment(root, { key: id, configuration, seed: deterministicSeed(id), execution: 'inline' });
+  const context = experimentContext({ ...owned, manifest });
+  try {
+    const result = work(structuredClone(manifest.configuration), context);
+    if (result && typeof result.then === 'function') {
+      // Consume async rejection after recording the synchronous interface error.
+      Promise.resolve(result).catch(() => {});
+      throw new ExperimentError('ASYNC_EXPERIMENT', 'Use a queued worker for asynchronous work');
+    }
+    verifyExperiment(manifest);
+    finishExperimentAttempt(owned.path, token, result);
+    return { id, result };
+  } catch (error) {
+    finishExperimentAttempt(owned.path, token, null, error);
+    throw error;
+  }
 }
 
 function inspectJob(jobDirectory) {
@@ -157,20 +198,11 @@ function inspectJob(jobDirectory) {
 /** Deterministic key order; running, failed, abandoned, and completed jobs stay
  * in the returned population. Previous attempts are never discarded. */
 export function listExperiments(root) {
-  const jobs = join(resolve(root), 'jobs');
-  const entries = path => {
-    try { return readdirSync(path, { withFileTypes: true }); }
-    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
-  };
-  const queued = entries(jobs).filter(entry => entry.isDirectory() && /^[0-9a-f]{64}$/.test(entry.name)).map(entry => inspectJob(join(jobs, entry.name))).filter(Boolean);
-  // Synchronous CLI trials publish UUID records before work starts. Include
-  // them in the same audit population even when no queue directory exists.
-  const inline = entries(resolve(root)).filter(entry => entry.isFile() && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/.test(entry.name)).map(entry => {
-    const record = read(join(resolve(root), entry.name));
-    assert(entry.name === `${record.id}.json` && ['running', 'completed', 'failed'].includes(record.status) && record.configurationHash === hash(record.configuration), 'REGISTRY_CORRUPT', 'Inline trial does not match its identity, status or configuration hash');
-    return { ...record, key: record.id, execution: 'inline', attempts: [{ ...record }] };
-  });
-  return [...queued, ...inline].sort((a, b) => compare(a.key, b.key));
+  const jobs = registryJobs(root);
+  let entries;
+  try { entries = readdirSync(jobs, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  return entries.filter(entry => entry.isDirectory() && /^[0-9a-f]{64}$/.test(entry.name)).map(entry => inspectJob(join(jobs, entry.name))).filter(Boolean).sort((a, b) => compare(a.key, b.key));
 }
 
 function alive(pid) {
@@ -193,7 +225,9 @@ export function recoverExperiment(root, key) {
   assert(!alive(claim.workerPid) && !alive(claim.supervisorPid), 'OWNER_ALIVE', 'Worker or supervisor is still alive; recovery is refused');
   const path = attemptDirectory(jobDirectory, claim.token);
   publish(join(path, 'finished.json'), { token: claim.token, status: 'abandoned', finishedAt: new Date().toISOString(), error: { code: 'ABANDONED', message: 'Explicit recovery after worker and supervisor exited' } });
-  publish(join(path, 'recovery.json'), { token: claim.token, nextGeneration: job.generation + 1, recoveredAt: new Date().toISOString(), recoveredByPid: process.pid });
+  // A persisted worker entrypoint can be retried. An inline closure cannot:
+  // recovery terminates its abandoned attempt; register a fresh trial to rerun.
+  if (job.execution === 'worker') publish(join(path, 'recovery.json'), { token: claim.token, nextGeneration: job.generation + 1, recoveredAt: new Date().toISOString(), recoveredByPid: process.pid });
   return inspectJob(jobDirectory);
 }
 
@@ -202,11 +236,27 @@ export function recoverExperiment(root, key) {
 export function claimExperiment(root, key, token, supervisorPid, generation) {
   const jobDirectory = directory(root, key);
   const job = inspectJob(jobDirectory);
-  if (!job || job.status !== 'queued' || job.generation !== generation) return null;
+  if (!job || job.execution !== 'worker' || job.status !== 'queued' || job.generation !== generation) return null;
+  const owned = claimAttempt(jobDirectory, token, supervisorPid, generation);
+  return owned && { manifest: job, ...owned };
+}
+
+function claimAttempt(jobDirectory, token, supervisorPid, generation) {
   const claim = { token, generation, workerPid: process.pid, supervisorPid, hostname: hostname(), startedAt: new Date().toISOString() };
   mkdirSync(join(attemptDirectory(jobDirectory, token), 'artifacts'), { recursive: true });
   if (!publish(join(jobDirectory, 'claims', `${generation}.json`), claim)) return null;
-  return { manifest: job, claim, path: attemptDirectory(jobDirectory, token) };
+  return { claim, path: attemptDirectory(jobDirectory, token) };
+}
+
+export function experimentContext({ manifest, claim, path }) {
+  const outputDirectory = join(path, 'artifacts');
+  return Object.freeze({
+    key: manifest.key, seed: manifest.seed, attemptId: claim.token, outputDirectory,
+    writeArtifact: (relativePath, value) => {
+      assert(!existsSync(join(path, 'finished.json')), 'ATTEMPT_FINISHED', 'Cannot write artifacts after an attempt finishes');
+      return writeExperimentArtifact(outputDirectory, relativePath, value);
+    },
+  });
 }
 
 export function finishExperimentAttempt(path, token, result, error) {
@@ -221,9 +271,11 @@ export function finishExperimentAttempt(path, token, result, error) {
   }
 }
 
-export function verifyWorker(manifest) {
-  assert(digestFile(fileURLToPath(manifest.workerModule)) === manifest.workerHash, 'WORKER_CHANGED', 'Worker entrypoint changed after enqueue; create a new experiment key');
-  assert(Object.entries(manifest.dependencies).every(([url, hash]) => digestFile(fileURLToPath(url)) === hash), 'DEPENDENCY_CHANGED', 'A declared worker dependency or dataset changed after enqueue');
+export function verifyExperiment(manifest) {
+  if (manifest.execution === 'worker') {
+    assert(digestFile(fileURLToPath(manifest.workerModule)) === manifest.workerHash, 'WORKER_CHANGED', 'Worker entrypoint changed after enqueue; create a new experiment key');
+    assert(Object.entries(manifest.dependencies).every(([url, hash]) => digestFile(fileURLToPath(url)) === hash), 'DEPENDENCY_CHANGED', 'A declared worker dependency or dataset changed after enqueue');
+  }
   assert(canonicalExperimentJson(toolkitProvenance()) === canonicalExperimentJson(manifest.toolkit), 'TOOLKIT_CHANGED', 'Toolkit or runtime changed after enqueue; use the original checkout or a new experiment key');
 }
 
@@ -281,7 +333,7 @@ async function execute(root, job, timeoutMs) {
 export async function runQueue(root, { concurrency = 1, timeoutMs = 60_000 } = {}) {
   assert(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 256, 'INVALID_CONCURRENCY', 'concurrency must be an integer in 1..256');
   assert(Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 2_147_483_647, 'INVALID_TIMEOUT', 'timeoutMs must be a positive 32-bit timer interval');
-  const pending = listExperiments(root).filter(job => job.status === 'queued');
+  const pending = listExperiments(root).filter(job => job.execution === 'worker' && job.status === 'queued');
   let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, async () => {
     while (cursor < pending.length) await execute(root, pending[cursor++], timeoutMs);

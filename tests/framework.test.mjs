@@ -1,12 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import Engine from '../build/engine.mjs';
 import { Backtest, orders, runStrategy } from '../src/framework.mjs';
 import { BacktestError, MAX_NAT, hash, json } from '../src/core.mjs';
-import { validateModelArtifact, EvaluationSession, runExperiment } from '../src/research.mjs';
+import { validateModelArtifact, EvaluationSession } from '../src/research.mjs';
 
 const demo = JSON.parse(readFileSync(new URL('../examples/demo.json', import.meta.url), 'utf8'));
 const config = (extra = {}) => ({ ...structuredClone(demo.config), initialCash: '1000', feePerLot: '1', ...extra });
@@ -205,11 +203,4 @@ test('selection cannot authorize final data, final protocol is fixed and single-
   assert.throws(() => session.authorize('final', 'final', hash('changed')), code('STRATEGY_CHANGED'));
   session.authorize('final', 'final', digest);
   assert.throws(() => session.authorize('final', 'final', digest), code('FINAL_TEST_REUSE'));
-});
-test('experiment registry records successful and failed work', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'bend-experiments-'));
-  runExperiment(directory, { a: 1 }, () => ({ value: 42 }));
-  assert.throws(() => runExperiment(directory, { a: 2 }, () => { throw new Error('failed training'); }));
-  const records = readdirSync(directory).map(file => JSON.parse(readFileSync(join(directory, file), 'utf8')));
-  assert.deepEqual(records.map(r => r.status).sort(), ['completed', 'failed']);
 });

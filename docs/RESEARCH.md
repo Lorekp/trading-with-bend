@@ -99,11 +99,30 @@ host. PID reuse conservatively blocks recovery. Failed/completed jobs are never
 automatically rerun; use a new key for a deliberate new trial. Recovery preserves
 abandoned attempt records and advances the claim generation without deleting it.
 
-`listExperiments` and the `status` CLI include synchronous `runExperiment`/backtest
-CLI trials stored as UUID records in the registry root, alongside queued jobs.
-These records have `execution: 'inline'` and one audit attempt; running and failed
-trials remain visible. Queue recovery and artifact retrieval apply to queued
-jobs, whose manifests record the worker and artifact locations.
+`runExperiment` from `src/experiments.mjs` executes synchronous work using the
+same immutable manifests, ownership claims, attempts, results and artifact
+inventories as queued workers. Its callback receives `(configuration, context)`;
+the configuration is a copy, and context supplies the same `key`, `seed`,
+`attemptId`, `outputDirectory` and `writeArtifact` as a worker. It returns
+`{ id, result }`, with `id` usable as the key for `readExperimentResult`,
+`verifyExperimentArtifacts` and `recoverExperiment`. Results must be finite,
+acyclic JSON. Use a queued worker for asynchronous work. Inline closure state
+and external dependencies are caller-owned and cannot be reconstructed from
+the manifest; the configuration must record the inputs needed to repeat a trial.
+
+`listExperiments` and the `status` CLI read one population for both execution
+modes, including running, failed and abandoned trials. Recovery checks recorded
+process ownership in either mode. A dead inline owner's attempt becomes
+`abandoned`; it is never queued because its callback exists only in memory.
+Register a fresh inline trial to repeat it. Worker recovery still authorizes a
+new attempt under the existing immutable specification.
+
+The registry format is now version 2. Start a new registry for this toolkit
+version; preserve older registries with their original checkout for inspection.
+The root-level UUID record format and its special listing path have been removed.
+CLI raw-input hashes and parsed input metadata are immutable attempt artifacts;
+the full report is also retained as the verified result, independently of any
+`--out` export.
 
 Workers pin their entrypoint, declared dependencies, toolkit source/build hashes,
 Node version and platform. Declare helper modules and datasets outside `src` as

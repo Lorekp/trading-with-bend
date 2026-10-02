@@ -53,7 +53,7 @@ Reports include dataset/config/source hashes, toolchain, runtime, strategy and p
 
 `EvaluationSession` fixes a protocol and strategy hash and rejects training/selection access to final partitions through Bend's role policy; final access is single-use within that session. The newer `withFinalHoldout` adds a persistent cross-process claim for a dataset plus holdout ID, consumed even on failure. Both remain cooperative helpers, not sandboxes against direct reads or another holdout identity. `gridJobs` provides validation-only parameter search; no reinforcement-learning reward layer is shipped.
 
-`runExperiment` creates a unique on-disk record before executing work, then records completion or failure. An interrupted run remains `running` for audit. CLI trials additionally save raw-input hashes, full configuration and dataset hashes as soon as available. Every CLI run uses it; direct low-level API calls must be wrapped explicitly. The registry cannot attest to experiments conducted outside it.
+`runExperiment` registers an immutable manifest and owned attempt before executing work, then publishes its result and artifact inventory or failure through the same registry as queued workers. An interrupted run remains `running` until explicit recovery checks that its owner has exited and marks it `abandoned`. Inline callbacks cannot be restored; repeating one requires a new trial. CLI trials save raw-input hashes, full configuration and dataset hashes as immutable artifacts as soon as available. Every CLI run uses it; direct low-level API calls must be wrapped explicitly. The registry cannot attest to experiments conducted outside it or reconstruct arbitrary inline closure state.
 
 ## Shared policy additions
 

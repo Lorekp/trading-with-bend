@@ -74,7 +74,7 @@ Quotes are executable model events, not guarantees that a real historical venue 
 
 ```js
 import { Backtest, runStrategy } from './src/framework.mjs';
-import { runExperiment } from './src/research.mjs';
+import { runExperiment } from './src/experiments.mjs';
 
 const { result } = runExperiment('output/experiments', input.config, () => {
   const run = new Backtest(input.config);

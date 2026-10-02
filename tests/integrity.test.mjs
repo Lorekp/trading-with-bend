@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -57,12 +57,11 @@ test('data, features, parameter grids and registry readers work without a build 
 for (const fails of [false, true]) {
   test(`experiment preserves registered configuration when ${fails ? 'failed' : 'successful'} work mutates its input`, async t => {
     const directory = copyProject(t);
-    const { runExperiment } = await load(directory, 'src/research.mjs');
+    const { runExperiment, listExperiments, readExperimentResult } = await load(directory, 'src/experiments.mjs');
     const { hash } = await load(directory, 'src/core.mjs');
     const configuration = { lookback: 10, model: { fold: 'training-1' } };
     const original = structuredClone(configuration);
     const records = join(directory, 'experiments');
-    let recordPath;
     const work = () => {
       configuration.lookback = 20;
       configuration.model.fold = 'training-2';
@@ -73,12 +72,12 @@ for (const fails of [false, true]) {
       assert.throws(() => runExperiment(records, configuration, work), /deliberate trial failure/);
     } else {
       const { id } = runExperiment(records, configuration, work);
-      recordPath = join(records, `${id}.json`);
+      assert.deepEqual(readExperimentResult(records, id), { score: 1 });
     }
     // A failing trial still has one completed audit record with its original inputs.
-    const files = readdirSync(records);
-    assert.equal(files.length, 1);
-    const record = JSON.parse(readFileSync(recordPath || join(records, files[0]), 'utf8'));
+    const population = listExperiments(records);
+    assert.equal(population.length, 1);
+    const [record] = population;
     assert.deepEqual(record.configuration, original);
     assert.equal(record.configurationHash, hash(original));
     assert.equal(record.configurationHash, hash(record.configuration));
