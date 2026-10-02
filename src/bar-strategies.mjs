@@ -2,6 +2,7 @@ import { checked, hash, nat, requireThat } from './core.mjs';
 import { RollingFeatures } from './features.mjs';
 import { fitRidge, predictRidge } from './models.mjs';
 import { cappedLots } from './policies.mjs';
+import { trainingWindow as createTrainingWindow } from './evaluation.mjs';
 
 const size = (value, name, minimum = 1) => {
   requireThat(Number.isSafeInteger(value) && value >= minimum && value <= 1_000_000, 'STRATEGY_PARAMETER', `${name} must be an integer in ${minimum}..1000000`);
@@ -155,7 +156,7 @@ export function createBarStrategy(spec) {
       if (feature.ready && !pending && rows.length >= minTrain && index - lastFitIndex >= retrainEvery) {
         const fold = `walkforward-${diagnostics.fits.length + 1}-${time}`;
         const completed = checked(now + trainingTime, 'training completion'), deployed = checked(completed + deploymentDelay, 'model deployment');
-        const model = fitRidge({ rows, schema, fold, cutoff: time, trainingStartedAt: time, trainingCompletedAt: String(completed), deployedAt: String(deployed), alpha });
+        const model = fitRidge({ training: createTrainingWindow(rows, { fold, cutoff: time }), schema, trainingStartedAt: time, trainingCompletedAt: String(completed), deployedAt: String(deployed), alpha });
         if (recordModels) modelArtifacts.push(model);
         pending = { model, fold }; lastFitIndex = index;
         diagnostics.fits.push({ fold, modelHash: model.hash, preprocessingHash: model.preprocessingHash, trainingDataHash: model.trainingDataHash, rowCount: rows.length,

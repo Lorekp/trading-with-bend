@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { resolve, join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { hash } from '../src/core.mjs';
-import { foldRows, walkForwardSplits, withFinalHoldout } from '../src/evaluation.mjs';
+import { foldRows, walkForwardSplits, trainingWindow, withFinalHoldout } from '../src/evaluation.mjs';
 import { fitForecast, predictForecast, forecastRuntime } from '../src/forecast.mjs';
 import { enqueueExperiment, runQueue, readExperimentResult, verifyExperimentArtifacts } from '../src/experiments.mjs';
 import { ethForecastData, fixtureBars } from '../experiments/eth-forecast/data.mjs';
@@ -17,7 +17,7 @@ test('a trained model target produces causal executable fills through the shared
   const schema = [{ name: 'price', source: 'price', kind: 'value', unit: 'quote-minor-per-lot' }];
   const features = computeFeatures([10, 11, 12].map((price, i) => ({ time: String(i), availableAt: String(i), values: { price } })), schema);
   const rows = features.map((feature, i) => ({ id: `train-${i}`, partition: 'train', feature, target: 0.01, labelAvailableAt: String(i + 1) }));
-  const model = fitRidge({ rows, schema, fold: 'train-before-five', cutoff: '4', trainingStartedAt: '4', trainingCompletedAt: '5', deployedAt: '5', alpha: 1 });
+  const model = fitRidge({ training: trainingWindow(rows, { fold: 'train-before-five', cutoff: '4' }), schema, trainingStartedAt: '4', trainingCompletedAt: '5', deployedAt: '5', alpha: 1 });
   const instrument = { symbol: 'ML', currency: 'EUR', priceTick: '1', lotSize: '1' };
   const ticks = [5, 6].map(time => ({ id: `tick-${time}`, type: 'tick', time: String(time), sourceTime: String(time), sequence: String(time), symbol: 'ML', currency: 'EUR', bid: '99', ask: '100', bidLots: '10', askLots: '10' }));
   const observed = computeFeatures(ticks.map(tick => ({ time: tick.time, availableAt: tick.time, values: { price: 100 } })), schema);
@@ -55,10 +55,10 @@ test('forecast sequences use completed minutes, exact future labels, and purged 
   const plan = walkForwardSplits(samples, { trainSize: 100, validationSize: 50, finalStart: 150, stepSize: 200 });
   assert.equal(plan.folds[0].purged.length, 5);
   assert.equal(plan.folds[0].validationPurged.length, 5);
-  const validation = foldRows(samples, plan, 'fold-1', 'select', 'validation');
+  const validation = foldRows(samples, plan, 'fold-1', 'select', 'validation').rows;
   assert.equal(validation.length, 45);
   assert.ok(validation.every(row => BigInt(row.labelAvailableAt) < BigInt(samples[plan.final[0]].time)));
-  const train = foldRows(samples, plan, 'fold-1', 'train', 'train');
+  const train = foldRows(samples, plan, 'fold-1', 'train', 'train').rows;
   assert.ok(train.every(row => BigInt(row.labelAvailableAt) < BigInt(plan.folds[0].validationStart)));
   assert.throws(() => foldRows(samples, plan, 'fold-1', 'train', 'final'), { code: 'PARTITION_DENIED' });
 });
@@ -69,14 +69,15 @@ test('forecast adapters train, reload, gate availability, and register all trial
     const runtime = { python, environment };
     const { samples, schema, contract } = ethForecastData(fixtureBars(300), 'synthetic');
     const plan = walkForwardSplits(samples, { trainSize: 100, validationSize: 30, finalStart: 150, stepSize: 200 });
-    const rows = foldRows(samples, plan, 'fold-1', 'train', 'train').map(row => ({ ...row, partition: 'train' }));
-    const validationRows = foldRows(samples, plan, 'fold-1', 'select', 'validation').map(row => ({ ...row, partition: 'validation' }));
-    const options = { rows, validationRows, schema, contract, fold: 'fold-1', cutoff: plan.folds[0].cutoff, seed: 41, runtime };
+    const training = foldRows(samples, plan, 'fold-1', 'train', 'train');
+    const validation = foldRows(samples, plan, 'fold-1', 'select', 'validation');
+    const validationRows = validation.rows;
+    const options = { training, validation, schema, contract, seed: 41, runtime };
     const parent = resolve('output'); mkdirSync(parent, { recursive: true });
     const root = mkdtempSync(join(parent, 'forecast-test-'));
     try {
-      assert.throws(() => fitForecast({ ...options, kind: 'zero', rows: rows.map(row => ({ ...row, partition: 'final' })) }), { code: 'TRAINING_PARTITION' });
-      assert.throws(() => fitForecast({ ...options, kind: 'zero', validationRows: [{ ...rows[0], partition: 'validation' }] }), { code: 'EVALUATION_PARTITION' });
+      assert.throws(() => fitForecast({ ...options, kind: 'zero', training: validation }), { code: 'PARTITION_DENIED' });
+      assert.throws(() => fitForecast({ ...options, kind: 'zero', validation: training }), { code: 'PARTITION_DENIED' });
       const fitted = {};
       for (const kind of ['zero', 'ridge', 'lightgbm', 'tcn']) {
         const parameters = kind === 'tcn' ? { epochs: 2 } : kind === 'lightgbm' ? { nEstimators: 5 } : {};
@@ -89,8 +90,13 @@ test('forecast adapters train, reload, gate availability, and register all trial
         assert.throws(() => predictForecast({ model: result.model, rows: validationRows, schema, contract, runtime }), { code: 'MODEL_NOT_AVAILABLE' });
       }
       // Validation labels may select weights, but cannot fit either scaler.
-      const shifted = fitForecast({ ...options, kind: 'zero', validationRows: validationRows.map(row => ({ ...row, target: row.target + 10 })) });
-      assert.deepEqual(shifted.model.preprocessing, fitted.zero.preprocessing);
+      const shiftedSamples = samples.map(row => validationRows.some(selected => selected.id === row.id) ? { ...row, target: row.target + 10 } : row);
+      const shiftedPlan = walkForwardSplits(shiftedSamples, plan.options);
+      const shifted = fitForecast({ ...options, kind: 'zero',
+        training: foldRows(shiftedSamples, shiftedPlan, 'fold-1', 'train', 'train'),
+        validation: foldRows(shiftedSamples, shiftedPlan, 'fold-1', 'select', 'validation') });
+      assert.deepEqual(shifted.model.preprocessing.means, fitted.zero.preprocessing.means);
+      assert.deepEqual(shifted.model.preprocessing.scales, fitted.zero.preprocessing.scales);
       assert.deepEqual(shifted.model.targetScaler, fitted.zero.targetScaler);
       const claim = { holdoutId: 'forecast-test', strategyHash: hash(fitted), protocol: { models: Object.keys(fitted) }, samples, plan };
       await withFinalHoldout(join(root, 'holdout'), claim, finalRows => {
@@ -107,6 +113,8 @@ test('forecast adapters train, reload, gate availability, and register all trial
           assert.throws(() => predictForecast({ model: { ...changedBackend, hash: hash(changedBackend) }, rows: finalRows, schema, contract, runtime }), { code: 'FORECAST_BACKEND_CHANGED' });
           assert.throws(() => predictForecast({ model: { ...model, seed: 42 }, rows: finalRows, schema, contract, runtime }), { code: 'MODEL_ARTIFACT' });
           assert.throws(() => predictForecast({ model, rows: finalRows, schema, contract: { ...contract, venue: 'hyperliquid' }, runtime }), { code: 'FEATURE_SCHEMA' });
+          const otherMarket = ethForecastData(fixtureBars(300), 'other-venue');
+          assert.throws(() => predictForecast({ model, rows: [otherMarket.latest], schema, contract, runtime }), { code: 'FORECAST_TARGET' });
         }
         return { models: 4 };
       });
@@ -145,3 +153,41 @@ test('forecast adapters train, reload, gate availability, and register all trial
       assert.equal(dirname(root), parent); rmSync(root, { recursive: true, force: true });
     }
   });
+
+test('verified split artifacts carry training identity through fitting and reject mixed forecast inputs', () => {
+  const schema = [{ name: 'price', source: 'price', kind: 'value', unit: 'ticks' }];
+  const features = computeFeatures(Array.from({ length: 12 }, (_, i) => ({ time: String((i + 1) * 10), availableAt: String((i + 1) * 10), values: { price: i + 1 } })), schema);
+  const samples = features.map((feature, i) => ({ id: `row-${i}`, time: feature.time, labelAvailableAt: String(BigInt(feature.time) + 1n), feature, target: i + 1 }));
+  const plan = walkForwardSplits(samples, { trainSize: 5, validationSize: 3, finalStart: 10 });
+  const training = foldRows(samples, plan, 'fold-1', 'train', 'train');
+  assert.ok(training.rows.every(row => row.partition === 'train'));
+  assert.equal(training.planHash, hash(plan));
+  assert.equal(training.datasetHash, plan.datasetHash);
+  assert.throws(() => { training.rows[0].partition = 'validation'; }, TypeError);
+  const args = { training, schema, trainingStartedAt: training.cutoff, trainingCompletedAt: training.cutoff, deployedAt: training.cutoff };
+  const model = fitRidge(args);
+  assert.deepEqual(fitRidge({ ...args, training: JSON.parse(JSON.stringify(training)) }), model);
+  assert.equal(model.trainingPartitionHash, training.hash);
+  assert.equal(model.preprocessing.trainingPartitionHash, training.hash);
+  const validation = foldRows(samples, plan, 'fold-1', 'select', 'validation');
+  assert.equal(validation.fold, model.fold);
+  assert.ok(Number.isFinite(predictRidge({ model, schema, fold: validation.fold, feature: validation.rows[0].feature, decisionTime: validation.rows[0].time }).prediction));
+  assert.throws(() => fitRidge({ ...args, training: { ...training, cutoff: '999' } }), { code: 'PARTITION_ARTIFACT' });
+  assert.throws(() => fitRidge({ ...args, training: validation }), { code: 'PARTITION_DENIED' });
+
+  const data = ethForecastData(fixtureBars(300), 'synthetic');
+  const split = walkForwardSplits(data.samples, { trainSize: 100, validationSize: 30, finalStart: 150, stepSize: 200 });
+  const options = { kind: 'zero', schema: data.schema, contract: data.contract,
+    training: foldRows(data.samples, split, 'fold-1', 'train', 'train'),
+    validation: foldRows(data.samples, split, 'fold-1', 'select', 'validation') };
+  for (const changed of [{ venue: 'other-venue' }, { instrument: 'BTCUSDT' }]) {
+    assert.throws(() => fitForecast({ ...options, contract: { ...data.contract, ...changed } }), { code: 'FORECAST_TARGET' });
+  }
+  const other = ethForecastData(fixtureBars(300, 42), 'synthetic');
+  const otherPlan = walkForwardSplits(other.samples, split.options);
+  const otherValidation = foldRows(other.samples, otherPlan, 'fold-1', 'select', 'validation');
+  assert.notEqual(otherValidation.fold, options.training.fold);
+  assert.throws(() => fitForecast({ ...options, validation: otherValidation }), { code: 'FOLD_MISMATCH' });
+  const changedRows = structuredClone(options.training); changedRows.rows[0].target++;
+  assert.throws(() => fitForecast({ ...options, training: changedRows }), { code: 'PARTITION_ARTIFACT' });
+});

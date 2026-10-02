@@ -72,6 +72,6 @@ export interface StrategyContext<Data = Record<string, unknown>> {
 
 /** null skips reconciliation; '0' explicitly requests a flat position. */
 export type Strategy<Data = Record<string, unknown>> = ((context: StrategyContext<Data>) => Decimal | null) & {
-  /** Minimum visible history; replay rejects a smaller explicit lookback. */
+  /** Default and minimum visible history; use replay lookback: 'all' for full history. */
   readonly lookback?: number;
 };

@@ -156,11 +156,12 @@ to the selected venue. Source prices and volume are used only for signals.
 
 Quote callbacks receive working orders only. Full order and fill audit records
 remain available on the venue's backtest and in its reports and checkpoints.
-Built-in quote strategies declare their minimum history as `strategy.lookback`.
-`runStrategy` rejects an explicit `lookback` smaller than that requirement before
-reading any quotes. Custom callbacks can declare the same property. Omitting
-the replay's `lookback` preserves complete history; use `tickCount` for elapsed
-observations when requesting bounded history.
+Built-in quote strategies declare their required history as `strategy.lookback`.
+`runStrategy` uses that bound by default (256 observations for undeclared custom
+callbacks), and rejects an explicit smaller bound before reading any quotes.
+Use `{ lookback: 'all' }` to request complete history explicitly. Custom callbacks
+must declare or configure the history they need; use `tickCount` for elapsed
+observations instead of `history.length`.
 
 For build-independent data preparation, import `data.mjs`, `features.mjs`,
 `numerics.mjs`, `search.mjs` or `core.mjs` directly. Registry inspection also
@@ -217,9 +218,15 @@ validation folds are errors.
 
 Use `foldRows(samples,plan,foldId,'train','train')` for fitting and
 `foldRows(...,'select','validation')` for selection. It verifies the dataset hash
-and regenerates the split plan to reject edited indices. `fitRidge` requires rows
-tagged `partition:'train'`, target values, feature artifacts and label times. It
-fits or accepts a scaler bound to the exact training rows/fold/cutoff. Training
+and regenerates the split plan to reject edited indices, then returns an immutable
+partition artifact with `rows`, partition labels, dataset/plan hashes, a fold
+identity derived from the plan, and cutoff. Pass this artifact as `training` to
+`fitRidge({ training, schema, ... })` or `fitStandardScaler({ training, schema })`;
+do not reconstruct its metadata or relabel its rows. Artifacts survive JSON
+round trips and fitting rejects changed contents. Online training without a split
+plan uses `trainingWindow(rows, { fold, cutoff })`, which explicitly records that
+different origin and requires rows already marked `train`. Neither is an access
+sandbox. `fitRidge` fits or accepts a scaler bound to the exact training artifact. Training
 start, completion, deployment and decision times form an explicit availability
 chain. The ridge objective is summed squared error plus alpha times squared
 standardized coefficients; the intercept is not penalized.

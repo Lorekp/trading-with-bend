@@ -53,8 +53,10 @@ Use a new study registry after changing code, data or configuration.
   feature names, definitions, order, units, window length and forecast target.
   Its `latest` row has no label and can be used for inference without waiting
   for a future price; `samples` contains only rows whose labels have matured.
-- `fitForecast`: accepts explicit train/validation rows, schema, target contract,
-  fold and exclusive cutoff. It returns a portable JSON model and retrospective
+- `fitForecast`: accepts `training` and `validation` partition artifacts from
+  `foldRows`, schema and target contract. Fold identity and exclusive cutoff come
+  from those artifacts; different datasets or split plans cannot be mixed.
+  It returns a portable JSON model and retrospective
   validation diagnostics. The `kind` selects zero, ridge, LightGBM or TCN.
 - `predictForecast`: reloads saved weights and preprocessing, checks the schema,
   target and availability, and returns instrument, venue, timestamp, horizon,
@@ -77,8 +79,9 @@ deviation; constant columns/targets use scale 1. Outputs are converted back to
 log-return units. Zero predicts exactly no price change.
 
 For another study, put its worker under `experiments/<study>/`, obtain fitting
-rows with `foldRows(..., 'train', 'train')`, and selection rows with
-`foldRows(..., 'select', 'validation')`. Mark their `partition` explicitly. Pin
+artifacts with `foldRows(..., 'train', 'train')` and
+`foldRows(..., 'select', 'validation')`. Pass them directly as `training` and
+`validation`; their `.rows` are already tagged. Pin
 `requirements-ml.txt`, worker helpers and datasets in `dependencies`; the registry
 automatically pins shared JavaScript and Python modules recursively under `src`.
 Save the returned model and diagnostics using `context.writeArtifact`.
@@ -113,6 +116,12 @@ at those timestamps. The saved model's earliest availability is one millisecond
 after the last validation label. This is a research availability floor, not a
 measured training/deployment latency. `predictForecast` rejects earlier requests.
 A live strategy must additionally account for actual computation and deployment.
+Each sequence row, including `latest`, carries the target contract hash. Fitting
+and prediction verify that hash against the declared instrument, venue, sequence
+shape and horizon. Mixing rows from another target contract is rejected even
+when feature schemas match. This records the caller's declared target; it does
+not attest to the origin of vendor prices.
+
 For final metrics, freeze the model/protocol and obtain final rows only inside
 `withFinalHoldout`; the demo never consumes that gate. As elsewhere in this
 toolkit, the gate is cooperative, not a sandbox against direct data access.

@@ -56,7 +56,35 @@ export function foldRows(samples, plan, foldId, role, partition) {
   requireThat(hash(verified) === hash(plan), 'SPLIT_TAMPER', 'Split indices or options changed after planning');
   const fold = verified.folds.find(f => f.id === foldId);
   requireThat(fold, 'UNKNOWN_FOLD', `Unknown fold ${foldId}`);
-  return frozenCopy(fold[partition].map(index => samples[index]));
+  const planHash = hash(verified);
+  return partitionArtifact({ origin: 'split', datasetHash: verified.datasetHash, planHash, foldId,
+    fold: hash({ planHash, foldId }), cutoff: fold.cutoff, partition,
+    rows: fold[partition].map(index => ({ ...samples[index], partition })) });
+}
+
+function partitionArtifact(body) {
+  const value = { format: 'research-partition-v1', ...body };
+  return frozenCopy({ ...value, hash: hash(value) });
+}
+
+/** Explicit online training window, with no claim of belonging to a split plan. */
+export function trainingWindow(rows, { fold, cutoff }) {
+  requireThat(Array.isArray(rows) && rows.every(row => row?.partition === 'train'), 'TRAINING_PARTITION', 'Online fitting requires explicit training rows');
+  return partitionArtifact({ origin: 'training-window', datasetHash: hash(rows), planHash: null, foldId: fold,
+    fold, cutoff, partition: 'train', rows });
+}
+
+// Shared fitting seam: verify the complete artifact before deriving its metadata.
+export function validatePartition(artifact, partition) {
+  requireThat(artifact && typeof artifact === 'object', 'PARTITION_ARTIFACT', 'A research partition artifact is required');
+  const { hash: digest, ...body } = artifact;
+  requireThat(body.format === 'research-partition-v1' && digest === hash(body), 'PARTITION_ARTIFACT', 'Research partition content changed');
+  requireThat(body.partition === partition && Array.isArray(body.rows) && body.rows.every(row => row.partition === partition), 'PARTITION_DENIED', 'Unexpected research partition');
+  requireThat(typeof body.fold === 'string' && body.fold.length > 0 && /^[0-9a-f]{64}$/.test(body.datasetHash), 'PARTITION_ARTIFACT', 'Partition identity is required');
+  nat(body.cutoff, 'partition cutoff');
+  requireThat(body.origin === 'split' ? /^[0-9a-f]{64}$/.test(body.planHash) && body.fold === hash({ planHash: body.planHash, foldId: body.foldId }) :
+    body.origin === 'training-window' && partition === 'train' && body.planHash === null && body.datasetHash === hash(body.rows), 'PARTITION_ARTIFACT', 'Invalid partition lineage');
+  return artifact;
 }
 
 /** Persistent one-shot release per dataset + named holdout, shared across processes.

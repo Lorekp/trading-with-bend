@@ -161,7 +161,7 @@ test('toolkit provenance automatically pins nested Python implementation changes
 async function runtimeWorkflows(directory) {
   const { computeFeatures } = await load(directory, 'src/features.mjs');
   const { fitRidge, predictRidge } = await load(directory, 'src/models.mjs');
-  const { walkForwardSplits } = await load(directory, 'src/evaluation.mjs');
+  const { walkForwardSplits, trainingWindow } = await load(directory, 'src/evaluation.mjs');
   const { archiveAccepted } = await load(directory, 'src/archive.mjs');
   const { Backtest } = await load(directory, 'src/framework.mjs');
   const { runExperiment, listExperiments, readExperimentResult } = await load(directory, 'src/experiments.mjs');
@@ -172,7 +172,7 @@ async function runtimeWorkflows(directory) {
   const registry = join(directory, 'registry');
   return {
     train() {
-      const model = fitRidge({ rows, schema, fold: 'standalone', cutoff: '4', trainingStartedAt: '4', trainingCompletedAt: '5', deployedAt: '5' });
+      const model = fitRidge({ training: trainingWindow(rows, { fold: 'standalone', cutoff: '4' }), schema, trainingStartedAt: '4', trainingCompletedAt: '5', deployedAt: '5' });
       return predictRidge({ model, schema, fold: model.fold, decisionTime: '5', feature: features[2] });
     },
     split: () => walkForwardSplits(samples, { trainSize: 3, validationSize: 2, finalStart: 7 }),

@@ -4,12 +4,16 @@ import { hash } from '../src/core.mjs';
 import { RollingFeatures, featureSchema, computeFeatures, validateFeatureArtifact } from '../src/features.mjs';
 import { fitStandardScaler, transformFeatures, fitRidge, validateRidgeModel, predictRidge, evaluateRegression } from '../src/models.mjs';
 import { stableMean, populationMoments, rootMeanSquare } from '../src/numerics.mjs';
+import { trainingWindow } from '../src/evaluation.mjs';
 
 const schema = [{ name: 'price', source: 'price', kind: 'value', unit: 'ticks' }];
 const observation = (time, price, availableAt = time) => ({ time: String(time), availableAt: String(availableAt), values: { price } });
 const feature = (time, price, availableAt = time) => computeFeatures([observation(time, price, availableAt)], schema)[0];
 const trainRows = (prices = [1, 2, 3], target = x => 2 * x + 1) => prices.map((price, i) => ({ id: `train-${i}`, partition: 'train', feature: feature(i + 1, price), target: target(price), labelAvailableAt: String(i + 1) }));
-const fit = (extra = {}) => fitRidge({ rows: trainRows(), schema, fold: 'fold-1', cutoff: '4', trainingStartedAt: '4', trainingCompletedAt: '5', deployedAt: '6', alpha: 0, ...extra });
+const fit = (extra = {}) => {
+  const { rows = trainRows(), fold = 'fold-1', cutoff = '4', ...options } = extra;
+  return fitRidge({ training: trainingWindow(rows, { fold, cutoff }), schema, trainingStartedAt: '4', trainingCompletedAt: '5', deployedAt: '6', alpha: 0, ...options });
+};
 const code = expected => error => error.code === expected;
 const near = (actual, expected, epsilon = 1e-10) => assert.ok(Math.abs(actual - expected) < epsilon, `${actual} differs from ${expected}`);
 const rehash = artifact => { const { hash: ignored, ...body } = artifact; return { ...body, hash: hash(body) }; };
@@ -74,11 +78,11 @@ test('feature artifacts are immutable, JSON round-trip stable and detect content
 });
 
 test('scaler uses training-only population mean/std and preserves zero-variance columns', () => {
-  const scaler = fitStandardScaler({ rows: trainRows(), schema, fold: 'fold-1', cutoff: '4' });
+  const scaler = fitStandardScaler({ training: trainingWindow(trainRows(), { fold: 'fold-1', cutoff: '4' }), schema });
   assert.deepEqual(scaler.means, [2]); near(scaler.scales[0], Math.sqrt(2 / 3));
   const result = transformFeatures({ scaler, feature: feature(10, 100), schema, fold: 'fold-1' });
   near(result[0], 98 / Math.sqrt(2 / 3)); assert.deepEqual(scaler.means, [2]);
-  const zero = fitStandardScaler({ rows: trainRows([3, 3, 3]), schema, fold: 'fold-1', cutoff: '4' });
+  const zero = fitStandardScaler({ training: trainingWindow(trainRows([3, 3, 3]), { fold: 'fold-1', cutoff: '4' }), schema });
   assert.deepEqual(zero.zeroVariance, [true]); assert.deepEqual(zero.scales, [1]);
   assert.deepEqual(transformFeatures({ scaler: zero, feature: feature(10, 3), schema, fold: 'fold-1' }), [0]);
 });
@@ -122,7 +126,7 @@ test('multivariate OLS recovers independent known coefficients and held-out comb
   const inputs = [[1, 1], [1, 2], [2, 1], [2, 3], [4, 2], [5, 4]];
   const featureRows = computeFeatures(inputs.map(([x, z], i) => ({ time: String(i + 1), availableAt: String(i + 1), values: { x, z } })), definitions);
   const rows = featureRows.map((entry, i) => ({ id: `multi-${i}`, partition: 'train', feature: entry, target: 7 + 2 * inputs[i][0] - 3 * inputs[i][1], labelAvailableAt: String(i + 1) }));
-  const model = fitRidge({ rows, schema: definitions, fold: 'multi', cutoff: '7', trainingStartedAt: '7', trainingCompletedAt: '8', deployedAt: '9', alpha: 0 });
+  const model = fitRidge({ training: trainingWindow(rows, { fold: 'multi', cutoff: '7' }), schema: definitions, trainingStartedAt: '7', trainingCompletedAt: '8', deployedAt: '9', alpha: 0 });
   near(model.coefficients[0] / model.preprocessing.scales[0], 2); near(model.coefficients[1] / model.preprocessing.scales[1], -3);
   for (const [x, z] of [[-4, 8], [10, -2], [0, 0]]) {
     const entry = computeFeatures([{ time: '10', availableAt: '10', values: { x, z } }], definitions)[0];
@@ -141,7 +145,7 @@ test('degenerate OLS fails explicitly while ridge handles constant and collinear
 });
 
 test('scaler reuse binds schema, fold and exact training data, including cutoff', () => {
-  const scaler = fitStandardScaler({ rows: trainRows(), schema, fold: 'fold-1', cutoff: '4' });
+  const scaler = fitStandardScaler({ training: trainingWindow(trainRows(), { fold: 'fold-1', cutoff: '4' }), schema });
   assert.deepEqual(fit({ scaler }), fit());
   assert.throws(() => fit({ scaler, fold: 'fold-2' }), code('FOLD_MISMATCH'));
   assert.throws(() => fit({ scaler, rows: trainRows([1, 2, 4]) }), code('PREPROCESSING_DATA'));
@@ -196,7 +200,7 @@ test('six identical values remain exactly constant in rolling features and stand
   ];
   const observations = Array.from({ length: 6 }, (_, i) => observation(i + 1, 1));
   assert.deepEqual(computeFeatures(observations, definitions).at(-1).values, [1, 0]);
-  const scaler = fitStandardScaler({ rows: trainRows(Array(6).fill(1)), schema, fold: 'constant', cutoff: '7' });
+  const scaler = fitStandardScaler({ training: trainingWindow(trainRows(Array(6).fill(1)), { fold: 'constant', cutoff: '7' }), schema });
   assert.deepEqual(scaler.means, [1]); assert.deepEqual(scaler.scales, [1]); assert.deepEqual(scaler.zeroVariance, [true]);
   assert.deepEqual(transformFeatures({ scaler, feature: feature(8, 1), schema, fold: 'constant' }), [0]);
 });
@@ -209,7 +213,7 @@ test('tiny and large finite variation yields meaningful moments and normalized f
   for (const magnitude of [1e-200, 1e200]) {
     const [mean, std] = computeFeatures([observation(1, magnitude), observation(2, 2 * magnitude)], definitions).at(-1).values;
     relativeNear(mean, 1.5 * magnitude); relativeNear(std, 0.5 * magnitude);
-    const scaler = fitStandardScaler({ rows: trainRows([magnitude, 2 * magnitude], () => 0), schema, fold: 'scale', cutoff: '3' });
+    const scaler = fitStandardScaler({ training: trainingWindow(trainRows([magnitude, 2 * magnitude], () => 0), { fold: 'scale', cutoff: '3' }), schema });
     assert.deepEqual(scaler.zeroVariance, [false]); relativeNear(scaler.scales[0], 0.5 * magnitude);
     near(transformFeatures({ scaler, feature: feature(8, magnitude), schema, fold: 'scale' })[0], -1);
     near(transformFeatures({ scaler, feature: feature(8, 2 * magnitude), schema, fold: 'scale' })[0], 1);
@@ -227,7 +231,7 @@ test('unrepresentable nonzero moments fail explicitly instead of becoming zero',
   assert.throws(() => stableMean([Number.MIN_VALUE, 0]), code('NUMERICAL_UNDERFLOW'));
   assert.throws(() => populationMoments([Number.MIN_VALUE, Number.MIN_VALUE, 0]), code('NUMERICAL_UNDERFLOW'));
   assert.throws(() => rootMeanSquare([Number.MIN_VALUE, ...Array(9).fill(0)]), code('NUMERICAL_UNDERFLOW'));
-  assert.throws(() => fitStandardScaler({ rows: trainRows([0, Number.MIN_VALUE], () => 0), schema, fold: 'subnormal', cutoff: '3' }), code('NUMERICAL_UNDERFLOW'));
+  assert.throws(() => fitStandardScaler({ training: trainingWindow(trainRows([0, Number.MIN_VALUE], () => 0), { fold: 'subnormal', cutoff: '3' }), schema }), code('NUMERICAL_UNDERFLOW'));
   assert.throws(() => stableMean([Number.MAX_VALUE, Number.MAX_VALUE, -Number.MAX_VALUE, -Number.MAX_VALUE, 1e-15]), code('NUMERICAL_UNDERFLOW'));
 });
 

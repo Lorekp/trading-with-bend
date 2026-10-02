@@ -2,6 +2,7 @@ import { hash, nat, requireThat } from './core.mjs';
 import { featureSchema, validateFeatureArtifact } from './features.mjs';
 import { modelReady, trainingAllowed } from './policies.mjs';
 import { populationMoments, rootMeanSquare, stableMean } from './numerics.mjs';
+import { validatePartition } from './evaluation.mjs';
 
 const finite = (value, name) => {
   requireThat(typeof value === 'number' && Number.isFinite(value), 'NONFINITE_MODEL', `${name} must be a finite number`);
@@ -40,11 +41,12 @@ function trainingRows(rows, schema, cutoff) {
 }
 
 /** Population standardization fitted only to explicit training rows available strictly before cutoff. */
-export function fitStandardScaler({ rows, schema, fold, cutoff }) {
+export function fitStandardScaler({ training, schema }) {
+  const { rows, fold, cutoff } = validatePartition(training, 'train');
   const id = identity(schema, fold), data = trainingRows(rows, id.schema, cutoff);
   const moments = id.schema.map((_, col) => populationMoments(rows.map(row => row.feature.values[col])));
   const means = moments.map(value => value.mean), deviations = moments.map(value => value.standardDeviation);
-  return seal({ format: 'standard-scaler-v1', featureSchemaHash: id.schemaHash, fold, trainingCutoff: cutoff, ...data, rowCount: rows.length,
+  return seal({ format: 'standard-scaler-v1', featureSchemaHash: id.schemaHash, fold, trainingCutoff: cutoff, trainingPartitionHash: training.hash, ...data, rowCount: rows.length,
     means, scales: deviations.map(value => value === 0 ? 1 : value), zeroVariance: deviations.map(value => value === 0) });
 }
 
@@ -87,20 +89,22 @@ function solve(matrix, target) {
 }
 
 /** Minimizes sum of squared errors + alpha * squared standardized coefficients; intercept is unpenalized. */
-export function fitRidge({ rows, schema, fold, cutoff, trainingStartedAt, trainingCompletedAt, deployedAt, alpha = 1, scaler }) {
+export function fitRidge({ training, schema, trainingStartedAt, trainingCompletedAt, deployedAt, alpha = 1, scaler }) {
+  const { rows, fold, cutoff } = validatePartition(training, 'train');
   const id = identity(schema, fold), data = trainingRows(rows, id.schema, cutoff);
   finite(alpha, 'ridge alpha'); requireThat(alpha >= 0, 'MODEL_PARAMETER', 'Ridge alpha must be nonnegative');
   requireThat(nat(cutoff, 'cutoff') <= nat(trainingStartedAt, 'trainingStartedAt'), 'TRAINING_AVAILABILITY', 'Training starts before its data cutoff');
   requireThat(modelReady({ labelAvailableAt: data.lastLabelAvailableAt, trainingStartedAt, trainingCompletedAt, deployedAt, decisionTime: deployedAt }), 'MODEL_NOT_AVAILABLE', 'Label, training and deployment chronology is invalid');
-  const preprocessing = scaler ?? fitStandardScaler({ rows, schema: id.schema, fold, cutoff });
+  const preprocessing = scaler ?? fitStandardScaler({ training, schema: id.schema });
   validateScaler(preprocessing, id.schema, fold);
-  requireThat(preprocessing.trainingCutoff === cutoff && preprocessing.trainingDataHash === data.trainingDataHash, 'PREPROCESSING_DATA', 'Scaler must be fitted on the exact training rows and cutoff of this model');
+  requireThat(preprocessing.trainingPartitionHash === training.hash && preprocessing.trainingCutoff === cutoff && preprocessing.trainingDataHash === data.trainingDataHash, 'PREPROCESSING_DATA', 'Scaler must be fitted on the exact training partition of this model');
   const x = rows.map(row => [1, ...transformFeatures({ scaler: preprocessing, feature: row.feature, schema: id.schema, fold })]);
   const size = id.schema.length + 1;
   const matrix = Array.from({ length: size }, (_, i) => Array.from({ length: size }, (_, j) => finite(x.reduce((sum, row) => sum + row[i] * row[j], 0) + (i === j && i > 0 ? alpha : 0), 'normal equations')));
   const rhs = Array.from({ length: size }, (_, col) => finite(x.reduce((sum, row, i) => sum + row[col] * rows[i].target, 0), 'normal equations'));
   const [intercept, ...coefficients] = solve(matrix, rhs);
-  return seal({ format: 'ridge-model-v1', featureSchemaHash: id.schemaHash, fold, trainingCutoff: cutoff, ...data, trainingStartedAt, trainingCompletedAt, deployedAt,
+  return seal({ format: 'ridge-model-v1', featureSchemaHash: id.schemaHash, fold, trainingCutoff: cutoff, trainingPartitionHash: training.hash,
+    datasetHash: training.datasetHash, planHash: training.planHash, ...data, trainingStartedAt, trainingCompletedAt, deployedAt,
     alpha, intercept, coefficients, preprocessingHash: preprocessing.hash, preprocessing, trainingRowIds: rows.map(row => row.id) });
 }
 
@@ -110,7 +114,7 @@ export function validateRidgeModel({ model, schema, fold, decisionTime }) {
   requireThat(model.featureSchemaHash === id.schemaHash, 'FEATURE_SCHEMA', 'Model schema differs');
   requireThat(model.fold === fold, 'FOLD_MISMATCH', 'Model belongs to another fold');
   validateScaler(model.preprocessing, id.schema, fold);
-  requireThat(model.preprocessingHash === model.preprocessing.hash && model.trainingDataHash === model.preprocessing.trainingDataHash && model.trainingCutoff === model.preprocessing.trainingCutoff && model.lastLabelAvailableAt === model.preprocessing.lastLabelAvailableAt, 'PREPROCESSING_DATA', 'Model and scaler lineage differ');
+  requireThat(model.trainingPartitionHash === model.preprocessing.trainingPartitionHash && model.preprocessingHash === model.preprocessing.hash && model.trainingDataHash === model.preprocessing.trainingDataHash && model.trainingCutoff === model.preprocessing.trainingCutoff && model.lastLabelAvailableAt === model.preprocessing.lastLabelAvailableAt, 'PREPROCESSING_DATA', 'Model and scaler lineage differ');
   requireThat(nat(model.trainingCutoff, 'trainingCutoff') <= nat(model.trainingStartedAt, 'trainingStartedAt'), 'MODEL_NOT_AVAILABLE', 'Training precedes cutoff');
   requireThat(modelReady({ labelAvailableAt: model.lastLabelAvailableAt, trainingStartedAt: model.trainingStartedAt, trainingCompletedAt: model.trainingCompletedAt, deployedAt: model.deployedAt, decisionTime }), 'MODEL_NOT_AVAILABLE', 'Model training or deployment is unavailable at decision time');
   requireThat(Array.isArray(model.coefficients) && model.coefficients.length === id.schema.length, 'MODEL_ARTIFACT', 'Model coefficient dimensions differ');

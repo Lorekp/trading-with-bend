@@ -6,6 +6,11 @@ uses the same runner with the existing `onBar` signal interface. Neither runner
 constructs an execution venue or falls back to information data for execution.
 Structural types are in [adapter-contracts.d.ts](../src/adapter-contracts.d.ts).
 
+Quote replay bounds history to `strategy.lookback` by default, or 256 observations
+when undeclared. Set `lookback: 'all'` for complete history, or supply a positive
+integer at least as large as the declared requirement. Use `tickCount` for elapsed
+observations; `history.length` describes only the visible window.
+
 | Module | Owns | Interface |
 | --- | --- | --- |
 | InformationSource | Market/features observations, publication timestamps and source provenance | `instrument`, `manifest`, `observations()` |

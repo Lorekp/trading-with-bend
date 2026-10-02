@@ -107,7 +107,7 @@ test('a fill while cancellation is in flight is reconciled without replacement o
   assertExecutionSafety(run, '3');
 });
 test('target callbacks cap requested positions and rebalance to flat without naked sales', () => {
-  const strategy = targetPosition(({ history }) => history.length < 4 ? '100' : '0', { maxPositionLots: '4' });
+  const strategy = targetPosition(({ tickCount }) => tickCount < 4 ? '100' : '0', { maxPositionLots: '4' });
   const run = runStrategy(config(), ticks(Array(8).fill(100), '2'), strategy);
   assert.equal(run.state.ledger.quantity, 0n);
   assert.deepEqual(run.events.filter(e => e.type === 'submit').map(e => [e.side, e.quantity]), [['buy', '4'], ['sell', '4']]);
@@ -155,7 +155,7 @@ test('seeded stress cases preserve capital, position caps and one working order 
   for (const seed of ['1', '7', '29', '4294967295']) {
     for (const [orderLatencyMs, cancelLatencyMs] of [['0', '0'], ['2', '5'], ['5', '2']]) {
       const quotes = syntheticQuotes({ instrument, count: 60, seed, initialBid: '100', volatilityTicks: '7', minLots: '0', maxLots: '2' });
-      const strategy = targetPosition(({ history }) => history.length % 9 < 4 ? '5' : '0', { maxPositionLots: '5' });
+      const strategy = targetPosition(({ tickCount }) => tickCount % 9 < 4 ? '5' : '0', { maxPositionLots: '5' });
       const run = runStrategy(config({ initialCash: '450', feePerLot: '3', orderLatencyMs, cancelLatencyMs }), quotes, strategy);
       assertExecutionSafety(run, '5');
       const cashFromFills = run.fills.reduce((cash, fill) => cash + (fill.side === 'buy' ? -fill.price * fill.quantity : fill.price * fill.quantity) - fill.fee, 450n);

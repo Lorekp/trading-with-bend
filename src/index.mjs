@@ -9,7 +9,7 @@ export { cappedLots, affordableLots, trainingAllowed, modelReady, canReadPartiti
 export { validateModelArtifact, EvaluationSession } from './research.mjs';
 export { runExperiment, enqueueExperiment, runQueue, listExperiments, recoverExperiment, readExperimentResult, verifyExperimentArtifacts, deterministicSeed } from './experiments.mjs';
 export { parameterGrid, gridJobs } from './search.mjs';
-export { walkForwardSplits, foldRows, withFinalHoldout, regularReturns, comparisonTable } from './evaluation.mjs';
+export { walkForwardSplits, foldRows, trainingWindow, withFinalHoldout, regularReturns, comparisonTable } from './evaluation.mjs';
 export { RollingFeatures, computeFeatures, featureSchema, validateFeatureArtifact } from './features.mjs';
 export { fitStandardScaler, transformFeatures, fitRidge, predictRidge, evaluateRegression, validateRidgeModel, regressionMetrics } from './models.mjs';
 export { targetPosition, buyAndHold, movingAverageCrossover, meanReversion } from './strategies.mjs';

@@ -23,13 +23,16 @@ export function sequenceSamples({ observations, schema, instrument, venue, seque
     name: `${entry.name}@${step - sequenceLength + 1}`, source: `${hash(entry)}@${step - sequenceLength + 1}`, kind: 'value', unit: entry.unit,
   }))).flat());
   const schemaHash = hash(packedSchema), samples = []; let latest = null;
+  const contract = { instrument, venue, sequenceLength, featureCount: sourceSchema.length,
+    intervalMs, horizonMs: String(interval * BigInt(horizonSteps)), target: 'log-close-return', sourceSchema };
+  const contractHash = hash(contract);
   for (let end = sequenceLength - 1; end < observations.length; end++) {
     const window = observations.slice(end - sequenceLength + 1, end + 1);
     if (window.some(row => !row.feature.ready)) continue;
     const current = observations[end], future = observations[end + horizonSteps];
     const body = { format: 'trailing-features-v1', schemaHash, time: current.feature.time, availableAt: current.feature.availableAt,
       values: window.flatMap(row => row.feature.values), ready: true };
-    latest = { id: `${instrument}/${venue}/${body.time}`, time: body.time, availableAt: body.availableAt, feature: { ...body, hash: hash(body) } };
+    latest = { id: `${instrument}/${venue}/${body.time}`, time: body.time, availableAt: body.availableAt, contractHash, feature: { ...body, hash: hash(body) } };
     if (future) {
       const target = Math.log(future.price / current.price);
       requireThat(Number.isFinite(target), 'SEQUENCE_PRICE', 'Log-return target exceeds the finite numeric range');
@@ -37,6 +40,5 @@ export function sequenceSamples({ observations, schema, instrument, venue, seque
     }
   }
   requireThat(latest !== null && latest.time === observations.at(-1).feature.time, 'SEQUENCE_DATA', 'No complete latest sequence after feature warmup');
-  return { schema: packedSchema, samples, latest, contract: { instrument, venue, sequenceLength, featureCount: sourceSchema.length,
-    intervalMs, horizonMs: String(interval * BigInt(horizonSteps)), target: 'log-close-return', sourceSchema } };
+  return { schema: packedSchema, samples, latest, contract };
 }

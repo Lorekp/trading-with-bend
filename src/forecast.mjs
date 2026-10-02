@@ -5,6 +5,7 @@ import { hash, nat, requireThat } from './core.mjs';
 import { featureSchema, validateFeatureArtifact } from './features.mjs';
 import { fitStandardScaler, validateScaler, regressionMetrics } from './models.mjs';
 import { populationMoments } from './numerics.mjs';
+import { validatePartition } from './evaluation.mjs';
 
 const backendPath = fileURLToPath(new URL('./ml/forecast.py', import.meta.url));
 const backendHash = () => hash(readFileSync(backendPath, 'utf8'));
@@ -41,11 +42,17 @@ function matrix(rows, schema, scaler) {
 /** Fit on explicit train rows; validation is used only for model selection.
  * Validation predictions are retrospective diagnostics, not executable signals.
  * Portable JSON artifacts retain weights, preprocessing, lineage and runtime. */
-export function fitForecast({ kind, rows, validationRows, schema, contract, fold, cutoff, seed = 1, parameters = {}, runtime }) {
+export function fitForecast({ kind, training, validation, schema, contract, seed = 1, parameters = {}, runtime }) {
   requireThat(['zero', 'ridge', 'lightgbm', 'tcn'].includes(kind), 'FORECAST_KIND', 'Unknown forecast adapter');
   schema = featureSchema(schema); contractCheck(contract, schema);
+  const { rows, fold, cutoff } = validatePartition(training, 'train');
+  const { rows: validationRows } = validatePartition(validation, 'validation');
+  requireThat(training.origin === 'split' && training.fold === validation.fold && training.planHash === validation.planHash &&
+    training.datasetHash === validation.datasetHash && training.cutoff === validation.cutoff, 'FOLD_MISMATCH', 'Training and validation must belong to the same verified split');
+  const contractHash = hash(contract);
+  requireThat([...rows, ...validationRows].every(row => row.contractHash === contractHash), 'FORECAST_TARGET', 'Sequence rows belong to a different target contract');
   requireThat(Number.isInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'MODEL_PARAMETER', 'Seed must be uint32');
-  const preprocessing = fitStandardScaler({ rows, schema, fold, cutoff });
+  const preprocessing = fitStandardScaler({ training, schema });
   requireThat(Array.isArray(validationRows) && validationRows.length > 0, 'EVALUATION_DATA', 'Later validation rows required');
   const ids = new Set(rows.map(row => row.id)); let last = null, selectedThrough = 0n;
   for (const row of validationRows) {
@@ -72,6 +79,7 @@ export function fitForecast({ kind, rows, validationRows, schema, contract, fold
     zero: -targetScaler.mean / targetScaler.scale }, runtime);
   requireThat(sourceHash === backendHash(), 'FORECAST_BACKEND_CHANGED', 'Python implementation changed during fitting');
   const model = seal({ format: 'forecast-model-v1', kind, contract, schema, fold, cutoff, seed, parameters: result.parameters,
+    datasetHash: training.datasetHash, planHash: training.planHash, trainingPartitionHash: training.hash, validationPartitionHash: validation.hash,
     preprocessing, targetScaler, trainingRowIds: rows.map(row => row.id), selectionRowIds: validationRows.map(row => row.id),
     selectionDataHash: hash(validationRows), selectedThrough: String(selectedThrough), availableAt: String(selectedThrough + 1n),
     backendHash: sourceHash, runtime: result.runtime, state: result.state, diagnostics: result.diagnostics });
@@ -100,6 +108,7 @@ export function predictForecast({ model, rows, schema, contract, runtime }) {
   requireThat(hash(featureSchema(schema)) === hash(model.schema) && hash(contract) === hash(model.contract), 'FEATURE_SCHEMA', 'Forecast schema or target contract differs');
   contractCheck(contract, schema); validateScaler(model.preprocessing, schema, model.fold);
   requireThat(Array.isArray(rows) && rows.length > 0, 'FORECAST_INPUT', 'Prediction rows required');
+  requireThat(rows.every(row => row.contractHash === hash(model.contract)), 'FORECAST_TARGET', 'Prediction rows belong to a different target contract');
   for (const row of rows) requireThat(nat(row.time, 'forecast time') >= nat(model.availableAt, 'model availableAt') &&
     row.feature.time === row.time && nat(row.feature.availableAt, 'feature availableAt') <= BigInt(row.time), 'MODEL_NOT_AVAILABLE', 'Selected model or feature unavailable at forecast time');
   const result = backend({ operation: 'predict', kind: model.kind, contract, state: model.state, expectedRuntime: model.runtime,

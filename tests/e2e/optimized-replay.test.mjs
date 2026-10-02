@@ -146,13 +146,22 @@ test('compact recording changes only trace detail and resumes with identical exe
   assert.throws(() => new Backtest(config, { orderStorage: 'none' }), { code: 'ORDER_STORAGE' });
 });
 
-test('invalid history bounds fail before any strategy callback; default still receives complete history', () => {
+test('history defaults are bounded and full history is an explicit choice', () => {
   for (const lookback of [0, -1, 1.5, Infinity, NaN, null, '3']) {
     assert.throws(() => runStrategy(config, ticks(3), () => assert.fail('Callback must not execute'), { lookback }), { code: 'STRATEGY_LOOKBACK' });
   }
-  let count = 0;
-  runStrategy(config, ticks(5), ({ history, tickCount }) => { count++; assert.equal(history.length, count); assert.equal(tickCount, count); return null; });
-  assert.equal(count, 5);
+  for (const [lookback, declared, expected] of [[undefined, 3, 3], [undefined, undefined, 256], ['all', 3, 300]]) {
+    let count = 0, entries = 0;
+    const strategy = ({ history, tickCount }) => {
+      count++; entries += history.length;
+      assert.equal(history.length, Math.min(count, expected));
+      assert.equal(tickCount, count); return null;
+    };
+    if (declared !== undefined) strategy.lookback = declared;
+    runStrategy(config, ticks(300), strategy, { lookback });
+    assert.equal(count, 300);
+    if (declared === 3 && lookback === undefined) assert.equal(entries, 897);
+  }
 });
 
 test('active engine storage retains completed-order cancellation metadata, FIFO, and every checkpoint boundary', () => {
@@ -270,10 +279,12 @@ test('declared strategy history rejects insufficient bounds and preserves comple
   for (const strategy of [movingAverageCrossover({ fast: 5, slow: 20, quantity: '3' }),
     meanReversion({ window: 20, quantity: '3' }), targetPosition('3', { maxPositionLots: '3', warmup: 25 })]) {
     assert.throws(() => runStrategy(config, ticks(), strategy, { lookback: strategy.lookback - 1 }), { code: 'STRATEGY_LOOKBACK' });
-    const full = runStrategy(config, ticks(), strategy).report();
+    const full = runStrategy(config, ticks(), strategy, { lookback: 'all' }).report();
+    const automatic = runStrategy(config, ticks(), strategy).report();
     const bounded = runStrategy(config, ticks(), strategy, { lookback: strategy.lookback }).report();
     assert.ok(full.fills.length > 0);
     assert.deepEqual(bounded, full);
+    assert.deepEqual(automatic, full);
   }
 });
 

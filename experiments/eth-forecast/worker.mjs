@@ -12,17 +12,17 @@ export default async function experiment(configuration, context) {
   const validationSize = finalStart - trainSize;
   const plan = walkForwardSplits(samples, { trainSize, validationSize, finalStart, stepSize: samples.length });
   const fold = plan.folds[0];
-  const rows = foldRows(samples, plan, fold.id, 'train', 'train').map(row => ({ ...row, partition: 'train' }));
-  const validationRows = foldRows(samples, plan, fold.id, 'select', 'validation').map(row => ({ ...row, partition: 'validation' }));
+  const training = foldRows(samples, plan, fold.id, 'train', 'train');
+  const validationPartition = foldRows(samples, plan, fold.id, 'select', 'validation');
   context.writeArtifact('split-plan.json', plan);
   context.writeArtifact('data.json', { dataHash, provenance: loaded.provenance, contract, schema, datasetSeed,
     forecastRows: samples.length, finalRows: plan.final.length, finalReleased: false });
-  const { model, validation } = fitForecast({ kind, rows, validationRows, schema, contract, fold: fold.id, cutoff: fold.cutoff,
+  const { model, validation } = fitForecast({ kind, training, validation: validationPartition, schema, contract,
     seed: context.seed, parameters, runtime: { python, environment, timeoutMs: 240000 } });
   context.writeArtifact('model.json', model);
   context.writeArtifact('validation.json', validation);
-  return { kind, dataHash, splitHash: hash(plan), validationTimesHash: hash(validationRows.map(row => row.time)),
-    trainingRows: rows.length, validationRows: validationRows.length, finalRows: plan.final.length, finalReleased: false,
+  return { kind, dataHash, splitHash: hash(plan), validationTimesHash: hash(validationPartition.rows.map(row => row.time)),
+    trainingRows: training.rows.length, validationRows: validationPartition.rows.length, finalRows: plan.final.length, finalReleased: false,
     mse: validation.mse, rmse: validation.rmse, mae: validation.mae, modelHash: model.hash,
     scope: 'Forecast selection diagnostics only; no trading, execution, profitability or final-test claim' };
 }

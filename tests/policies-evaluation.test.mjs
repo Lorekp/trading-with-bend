@@ -34,7 +34,7 @@ test('walk-forward uses label maturity plus embargo and never includes final ind
     for (const i of fold.train) assert.ok(BigInt(samples[i].labelAvailableAt) < BigInt(fold.cutoff));
     for (const i of [...fold.train, ...fold.validation]) assert.ok(i < 13);
   }
-  assert.equal(foldRows(samples, plan, 'fold-1', 'train', 'train').length, 3);
+  assert.equal(foldRows(samples, plan, 'fold-1', 'train', 'train').rows.length, 3);
   assert.throws(() => foldRows(samples, plan, 'fold-1', 'train', 'validation'), { code: 'PARTITION_DENIED' });
   const tampered = structuredClone(plan); tampered.folds[0].train.push(14);
   assert.throws(() => foldRows(samples, tampered, 'fold-1', 'train', 'train'), { code: 'SPLIT_TAMPER' });
@@ -56,7 +56,7 @@ test('validation excludes labels and features reaching the final boundary', () =
     const plan = walkForwardSplits(rows, options), last = plan.folds.at(-1);
     assert.deepEqual(last.validation, [11]);
     assert.deepEqual(last.validationPurged, [12]);
-    assert.deepEqual(foldRows(rows, plan, last.id, 'select', 'validation').map(row => row.id), ['s11']);
+    assert.deepEqual(foldRows(rows, plan, last.id, 'select', 'validation').rows.map(row => row.id), ['s11']);
   }
   const delayed = structuredClone(samples); delayed[11].availableAt = '130';
   assert.throws(() => walkForwardSplits(delayed, options), { code: 'EMPTY_VALIDATION_FOLD' });
