@@ -1,5 +1,5 @@
 export { Backtest, BacktestError, runStrategy, runtimeProvenance, hash, json, MAX_NAT } from './framework.mjs';
-export { cappedLots, affordableLots, trainingAllowed, modelReady, canReadPartition } from './policies.mjs';
+export { cappedLots, affordableLots, trainingAllowed, modelReady, canReadPartition, barExecutionAllowed } from './policies.mjs';
 export { validateModelArtifact, EvaluationSession, runExperiment } from './research.mjs';
 export { enqueueExperiment, runQueue, listExperiments, recoverExperiment, readExperimentResult, verifyExperimentArtifacts, deterministicSeed } from './experiments.mjs';
 export { parameterGrid, gridJobs } from './search.mjs';
@@ -8,3 +8,6 @@ export { RollingFeatures, computeFeatures, featureSchema, validateFeatureArtifac
 export { fitStandardScaler, transformFeatures, fitRidge, predictRidge, evaluateRegression, validateRidgeModel } from './models.mjs';
 export { targetPosition, buyAndHold, movingAverageCrossover, meanReversion } from './strategies.mjs';
 export { QUOTE_UNITS, parseQuoteCsv, validateTicks, syntheticQuotes } from './data.mjs';
+export { loadBinanceBars, loadBinanceSeries } from './binance-bars.mjs';
+export { runBarStrategy, validateBars } from './bar-replay.mjs';
+export { createBarStrategy } from './bar-strategies.mjs';

@@ -33,9 +33,16 @@ accounting, execution, feature, sizing, split, metric or registry code.
   changing shared infrastructure during a long experiment campaign.
 - Build once before starting a campaign. Build locking prevents simultaneous
   writers; a stale lock requires checking that its recorded PID has exited.
-- Run `npm test` after shared changes. It checks the Bend laws/kernel when Lean
-  is present, reference comparisons, deliberate broken-proof cases and actual
-  multiprocess races. Run `npm run research-demo` for the complete rules/ML path.
+- Prefer end-to-end tests to new isolated unit tests. Run `npm test` after shared
+  changes: it checks Bend/Lean, data archives through fills and reports, exact
+  optimized/reference replay, broken-proof cases and actual multiprocess races.
+  Preserve existing focused regressions; run `npm run test:regression` when
+  changing the ledger or research infrastructure. Use `npm run eth-demo` for a
+  full six-trial study on the downloaded ETH data. Never imply this cash-price
+  proxy implements perpetual funding/margin; use the declared bar assumptions.
+- Profile representative data before optimizing. Prefer bounded callback history
+  and compact traces for long campaigns. Keep full order/fill audit records and
+  prove/test any optimized accounting path against the reference execution.
 - Do not claim floating-point model metrics, vendor data, queue realism, foreign
   code or callback isolation are formally proved. See docs/CONTRACT.md and
   docs/RESEARCH.md for the precise boundaries.

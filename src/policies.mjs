@@ -23,3 +23,6 @@ export function trainingAllowed({ observationTime, labelAvailableAt, cutoff }) {
 export function modelReady({ labelAvailableAt, trainingStartedAt, trainingCompletedAt, deployedAt, decisionTime }) {
   return Policy.ready_chain(nat(labelAvailableAt, 'labelAvailableAt'), nat(trainingStartedAt, 'trainingStartedAt'), nat(trainingCompletedAt, 'trainingCompletedAt'), nat(deployedAt, 'deployedAt'), nat(decisionTime, 'decisionTime'));
 }
+export function barExecutionAllowed({ availableAt, openTime, executionTime }) {
+  return Policy.bar_execution_allowed(nat(availableAt, 'availableAt'), nat(openTime, 'openTime'), nat(executionTime, 'executionTime'));
+}

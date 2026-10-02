@@ -121,3 +121,56 @@ law future_observations_are_excluded:
   for delay: Nat
   for mature: Nat
   {P.training_allowed(Nat.add(cutoff, delay), mature, cutoff) == False{} : Bool}
+
+law unavailable_bars_cannot_supply_execution:
+  for execution: Nat
+  for delay: Nat
+  for open: Nat
+  {P.bar_execution_allowed(Nat.add(execution, delay), open, execution) == False{} : Bool}
+
+law bar_open_must_precede_execution:
+  for +execution: Nat
+  for delay: Nat
+  for available: Nat
+  {P.bar_execution_allowed(available, Nat.add(execution, delay), execution) == False{} : Bool}
+
+law ready_bar_executes_after_delay:
+  for open: Nat
+  for delay: Nat
+  {P.bar_execution_allowed(open, open, 1n+Nat.add(open, delay)) == True{} : Bool}
+
+law compaction_preserves_ledger:
+  for ledger: E.Ledger
+  for orders: List<&2, E.Order>
+  {E.compact_state(E.State{ledger, orders}) == E.State{ledger, E.working_orders(orders)} : E.State}
+
+law working_orders_empty:
+  {E.working_orders(Nil{}) == Nil{} : List<&2, E.Order>}
+
+law closed_orders_are_removed:
+  for id: Nat
+  for side: E.Side
+  for limit: Nat
+  for accepted: Nat
+  for filled: Nat
+  for cancelled: Nat
+  for decision: Nat
+  for arrival: Nat
+  for cancel_at: Maybe<&2, Nat>
+  for tail: List<&2, E.Order>
+  {E.working_orders(Con{E.Order{id, side, limit, accepted, 0n, filled, cancelled, decision, arrival, cancel_at}, tail}) == E.working_orders(tail) : List<&2, E.Order>}
+
+law working_orders_keep_fifo:
+  for id: Nat
+  for side: E.Side
+  for limit: Nat
+  for accepted: Nat
+  for remaining: Nat
+  for filled: Nat
+  for cancelled: Nat
+  for decision: Nat
+  for arrival: Nat
+  for cancel_at: Maybe<&2, Nat>
+  for tail: List<&2, E.Order>
+  {E.working_orders(Con{E.Order{id, side, limit, accepted, 1n+remaining, filled, cancelled, decision, arrival, cancel_at}, tail})
+    == Con{E.Order{id, side, limit, accepted, 1n+remaining, filled, cancelled, decision, arrival, cancel_at}, E.working_orders(tail)} : List<&2, E.Order>}

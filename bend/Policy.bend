@@ -42,3 +42,8 @@ def ready_chain(labels: Nat, +started: Nat, +completed: Nat, +deployed: Nat, dec
   Bool.and(Nat.is_le(labels, started),
     Bool.and(Nat.is_le(started, completed),
       Bool.and(Nat.is_le(completed, deployed), Nat.is_le(deployed, decision))))
+
+# A modeled bar execution opportunity must follow both information availability
+# and the open timestamp. Price/spread/volume assumptions remain host inputs.
+def bar_execution_allowed(available: Nat, open: Nat, +execution: Nat) -> Bool:
+  Bool.and(Nat.is_lt(available, execution), Nat.is_lt(open, execution))

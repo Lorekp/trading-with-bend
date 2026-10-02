@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import Engine from '../build/engine.mjs';
 
+// Only values recursively frozen here may bypass future recursive traversal.
+// Object.isFrozen alone is insufficient: callers can shallow-freeze containers.
+const DEEP_FROZEN = new WeakSet();
+
 export const MAX_NAT = (1n << 48n) - 1n;
 export class BacktestError extends Error {
   constructor(code, message) { super(message); this.name = 'BacktestError'; this.code = code; }
@@ -73,18 +77,25 @@ function validateEvent(event, config) {
     requireThat(sourceTime === time, 'NON_EXECUTABLE_QUOTE', 'This replay model requires sourceTime = exchange event time; delayed or stale observations cannot supply liquidity');
   }
 }
-function verifyState(state, config) {
-  const os = orders(state), fee = BigInt(config.feePerLot);
+function verifyState(state, config, os = orders(state)) {
+  const fee = BigInt(config.feePerLot);
+  let cashReserved = 0n, quantityReserved = 0n;
   checked(state.ledger.cash, 'cash'); checked(state.ledger.quantity, 'quantity');
   for (const o of os) {
     requireThat(o.accepted === o.remaining + o.filled + o.cancelled, 'ORDER_ACCOUNTING', 'Order quantities do not reconcile');
     requireThat(o.remaining >= 0n && o.filled >= 0n && o.cancelled >= 0n, 'ORDER_ACCOUNTING', 'Negative order quantity');
+    if (o.side.$ === 'Buy') cashReserved += o.remaining * (o.limit + fee);
+    else if (o.side.$ === 'Sell') quantityReserved += o.remaining;
   }
-  const cashReserved = os.reduce((sum, o) => sum + (o.side.$ === 'Buy' ? o.remaining * (o.limit + fee) : 0n), 0n);
-  const quantityReserved = os.reduce((sum, o) => sum + (o.side.$ === 'Sell' ? o.remaining : 0n), 0n);
   requireThat(cashReserved <= state.ledger.cash && quantityReserved <= state.ledger.quantity, 'RESERVATION_BREACH', 'Outstanding reservations exceed capital');
   return { cashReserved, quantityReserved };
 }
+function sameOrder(left, right) {
+  return left === right || left.$ === right.$ && left.id === right.id && left.side.$ === right.side.$ && left.limit === right.limit &&
+    left.accepted === right.accepted && left.remaining === right.remaining && left.filled === right.filled && left.cancelled === right.cancelled &&
+    left.decision === right.decision && left.arrival === right.arrival && left.cancel_at.$ === right.cancel_at.$ && left.cancel_at.value === right.cancel_at.value;
+}
+function orderList(values) { return values.reduceRight((tail, head) => ({ $: 'Con', head, tail }), { $: 'Nil' }); }
 function sourceManifest() {
   const paths = ['LAWS.bend', 'PROOF.bend', 'scripts/build.mjs', 'build/engine.mjs', 'build/policy.mjs', 'build/archive.mjs', 'toolchain.json', 'package.json',
     ...readdirSync(new URL('../src/', import.meta.url)).filter(name => name.endsWith('.mjs')).map(name => `src/${name}`),
@@ -109,10 +120,22 @@ export class Backtest {
   #lastTime;
   #lastSequence;
   #mark;
+  #options;
+  #reservations;
+  #orders;
+  #archive;
+  #closedCancels;
+  #allOrders;
+  #publicState;
+  #workingOrders;
   get sources() { return this.#sources; }
   get verification() { return this.#verification; }
   get config() { return this.#config; }
-  get state() { return this.#state; }
+  get state() {
+    if (this.#options.orderStorage === 'all') return this.#state;
+    return this.#publicState ??= freeze({ $: 'State', ledger: this.#state.ledger, orders: orderList(this.orders) });
+  }
+  get ledger() { return this.#state.ledger; }
   get mark() { return this.#mark; }
   get lastTime() { return this.#lastTime; }
   get lastSequence() { return this.#lastSequence; }
@@ -121,7 +144,15 @@ export class Backtest {
   get fills() { return Object.freeze(this.#fills.slice()); }
   get valuations() { return Object.freeze(this.#valuations.slice()); }
   get errors() { return Object.freeze(this.#errors.slice()); }
-  constructor(config) {
+  get options() { return this.#options; }
+  get orders() { return this.#options.orderStorage === 'all' ? this.#orders : this.#allOrders ??= freeze([...this.#archive.values()]); }
+  get workingOrders() { return this.#options.orderStorage === 'active' ? this.#orders : this.#workingOrders ??= freeze(this.#orders.filter(order => order.remaining > 0n)); }
+  constructor(config, options = {}) {
+    keys(options, ['traceMode', 'orderStorage'], 'options');
+    const traceMode = options.traceMode === undefined ? 'full' : options.traceMode;
+    const orderStorage = options.orderStorage === undefined ? 'all' : options.orderStorage;
+    requireThat(traceMode === 'full' || traceMode === 'compact', 'TRACE_MODE', 'traceMode must be full or compact');
+    requireThat(orderStorage === 'all' || orderStorage === 'active', 'ORDER_STORAGE', 'orderStorage must be all or active');
     const verification = JSON.parse(readFileSync(new URL('../build/verification.json', import.meta.url), 'utf8'));
     const current = sourceManifest();
     requireThat(canonical(current) === canonical(LOADED_SOURCES), 'STALE_RUNTIME', 'Source changed after module loading; restart the process');
@@ -129,6 +160,9 @@ export class Backtest {
     this.#sources = LOADED_SOURCES; this.#verification = freeze(verification);
     this.#config = freeze(validateConfig(config));
     this.#state = freeze(Engine.initial(BigInt(config.initialCash)));
+    this.#orders = freeze(orders(this.#state));
+    this.#options = freeze({ traceMode, orderStorage }); this.#reservations = freeze(verifyState(this.#state, this.#config));
+    this.#archive = new Map(); this.#closedCancels = new Map(); this.#allOrders = null; this.#publicState = null; this.#workingOrders = null;
     this.#events = []; this.#trace = []; this.#fills = []; this.#valuations = []; this.#errors = [];
     this.#seen = new Map(); this.#orderIds = new Set(); this.#lastTime = null; this.#lastSequence = null; this.#mark = null;
   }
@@ -152,20 +186,43 @@ export class Backtest {
     // Stage every update. Failure cannot partially commit an event.
     let state = Engine.advance(this.#state, t), mark = this.#mark, status = 'applied';
     const before = state.ledger, previousOrders = orders(state), newFills = [];
+    const archiveUpdates = new Map();
+    let finalOrders;
     try {
+      if (this.#options.orderStorage === 'active') {
+        // Completed orders reserve nothing, but delayed cancellation metadata is
+        // still part of the authoritative archive and full trace. Advance only
+        // those few archived orders with a pending cancellation, through Bend.
+        for (const [id, order] of this.#closedCancels) {
+          if (order.cancel_at.value <= t) {
+            const advanced = Engine.advance({ $: 'State', ledger: before, orders: orderList([order]) }, t);
+            verifyState(advanced, this.#config);
+            archiveUpdates.set(id, orders(advanced)[0]);
+          }
+        }
+      }
       if (event.type === 'submit') {
         requireThat(!this.#orderIds.has(event.orderId), 'DUPLICATE_ORDER', 'Order IDs cannot be reused, including rejected orders');
         const arrival = checked(t + BigInt(this.#config.orderLatencyMs), 'arrival');
         const result = Engine.submit(state, BigInt(event.orderId), { $: event.side === 'buy' ? 'Buy' : 'Sell' }, BigInt(event.limit), BigInt(event.quantity), t, arrival, fee);
         state = result.state; status = result.$ === 'Accepted' ? 'accepted' : 'rejected-capital-or-fee';
       } else if (event.type === 'cancel') {
-        requireThat(previousOrders.some(o => o.id === BigInt(event.orderId)), 'UNKNOWN_ORDER', 'Cannot cancel an unaccepted order');
-        state = Engine.request_cancel(state, BigInt(event.orderId), checked(t + BigInt(this.#config.cancelLatencyMs), 'cancel arrival'));
-        state = Engine.advance(state, t);
+        const id = BigInt(event.orderId), pending = previousOrders.some(order => order.id === id);
+        const archived = archiveUpdates.get(id) ?? this.#archive.get(id);
+        requireThat(pending || this.#options.orderStorage === 'active' && archived, 'UNKNOWN_ORDER', 'Cannot cancel an unaccepted order');
+        const arrival = checked(t + BigInt(this.#config.cancelLatencyMs), 'cancel arrival');
+        if (pending) {
+          state = Engine.request_cancel(state, id, arrival);
+          state = Engine.advance(state, t);
+        } else {
+          const closed = Engine.advance(Engine.request_cancel({ $: 'State', ledger: before, orders: orderList([archived]) }, id, arrival), t);
+          verifyState(closed, this.#config);
+          archiveUpdates.set(id, orders(closed)[0]);
+        }
       } else if (event.type === 'tick') {
         const bid = BigInt(event.bid), ask = BigInt(event.ask);
         state = Engine.tick(state, t, bid, ask, BigInt(event.bidLots), BigInt(event.askLots), fee);
-        const after = orders(state);
+        const after = orders(state); finalOrders = after;
         for (let i = 0; i < after.length; i++) {
           const o = after[i], lots = o.filled - previousOrders[i].filled;
           if (lots === 0n) continue;
@@ -180,15 +237,44 @@ export class Backtest {
         for (const side of ['buy', 'sell']) requireThat(newFills.filter(f => f.side === side).reduce((sum, f) => sum + f.quantity, 0n) <= BigInt(side === 'buy' ? event.askLots : event.bidLots), 'LIQUIDITY', 'Shared liquidity exceeded');
         mark = { price: bid, time: t };
       }
-      verifyState(state, this.#config);
+      finalOrders ??= orders(state);
+      const reservations = verifyState(state, this.#config, finalOrders);
       const expected = newFills.reduce((a, f) => ({ cash: a.cash + (f.side === 'buy' ? -f.price * f.quantity : f.price * f.quantity) - f.fee, quantity: a.quantity + (f.side === 'buy' ? f.quantity : -f.quantity) }), { cash: before.cash, quantity: before.quantity });
       requireThat(expected.cash === state.ledger.cash && expected.quantity === state.ledger.quantity, 'LEDGER_MISMATCH', 'Postings disagree with the Bend ledger');
       const equity = mark ? checked(state.ledger.cash + state.ledger.quantity * mark.price, 'equity') : state.ledger.cash;
+      if (this.#options.orderStorage === 'active') {
+        for (const order of finalOrders) archiveUpdates.set(order.id, order);
+        const expectedWorking = finalOrders.filter(order => order.remaining > 0n);
+        const compact = Engine.compact_state(state), compactOrders = orders(compact);
+        requireThat(compact.ledger.cash === state.ledger.cash && compact.ledger.quantity === state.ledger.quantity &&
+          compactOrders.length === expectedWorking.length && compactOrders.every((order, index) => sameOrder(order, expectedWorking[index])),
+        'COMPACTION_MISMATCH', 'Bend compaction changed ledger or live order FIFO/content');
+        state = compact; finalOrders = compactOrders;
+      }
+      // The generated host bridge decodes fresh objects even when no ledger or
+      // order field changed. Reuse only exactly equal, already immutable data;
+      // the Bend result has still passed every accounting/causality check above.
+      if (state.ledger.$ === this.#state.ledger.$ && state.ledger.cash === this.#state.ledger.cash && state.ledger.quantity === this.#state.ledger.quantity &&
+          finalOrders.length === this.#orders.length && finalOrders.every((order, index) => sameOrder(order, this.#orders[index]))) {
+        state = this.#state; finalOrders = this.#orders;
+      }
       // Commit only after all checks pass.
       this.#state = freeze(state); this.#mark = freeze(mark); this.#lastTime = t; this.#lastSequence = seq;
+      this.#orders = freeze(finalOrders);
+      this.#reservations = freeze(reservations);
+      for (const [id, order] of archiveUpdates) {
+        const previous = this.#archive.get(id);
+        if (previous && sameOrder(previous, order)) continue;
+        const immutable = freeze(order);
+        this.#archive.set(id, immutable); this.#allOrders = null;
+        if (order.remaining === 0n && order.cancel_at.$ === 'Some') this.#closedCancels.set(id, immutable);
+        else this.#closedCancels.delete(id);
+      }
+      this.#publicState = null; this.#workingOrders = null;
       this.#seen.set(event.id, digest); if (event.type === 'submit') this.#orderIds.add(event.orderId);
       this.#events.push(freeze(structuredClone(event))); this.#fills.push(...freeze(newFills));
-      this.#trace.push(freeze({ eventId: event.id, sequence: seq, time: t, status, ledger: state.ledger, orders: orders(state), reservations: verifyState(state, this.#config), fills: newFills.map(f => f.id) }));
+      this.#trace.push(freeze({ eventId: event.id, sequence: seq, time: t, status, ledger: state.ledger,
+        ...(this.#options.traceMode === 'full' ? { orders: this.orders } : {}), reservations, fills: newFills.map(f => f.id) }));
       if (event.type === 'tick') this.#valuations.push(freeze({ time: t, equity, cash: state.ledger.cash, quantity: state.ledger.quantity, mark: mark.price }));
       return { duplicate: false, status, fills: structuredClone(newFills) };
     } catch (error) {
@@ -200,15 +286,15 @@ export class Backtest {
   checkpoint() {
     // Event-sourced checkpoint: replay reconstructs reservations, queues, cancellations,
     // deduplication identities, valuations and all other continuation state.
-    const body = { format: 'bend-backtest-checkpoint-v1', config: this.#config, events: this.#events, errors: this.#errors, sources: this.#sources };
+    const body = { format: 'bend-backtest-checkpoint-v1', config: this.#config, options: this.#options, events: this.#events, errors: this.#errors, sources: this.#sources };
     return JSON.parse(json({ ...body, checksum: hash(body) }));
   }
   static resume(checkpoint) {
     const { checksum, ...body } = checkpoint;
     requireThat(body.format === 'bend-backtest-checkpoint-v1' && checksum === hash(body), 'CHECKPOINT_CORRUPT', 'Checkpoint format or checksum invalid');
     requireThat(canonical(body.sources) === canonical(sourceManifest()), 'CHECKPOINT_VERSION', 'Checkpoint source artifacts differ from this engine');
-    const run = new Backtest(body.config).run(body.events);
-    run.#errors = structuredClone(body.errors);
+    const run = new Backtest(body.config, body.options ?? {}).run(body.events);
+    run.#errors = freeze(structuredClone(body.errors)).slice();
     return run;
   }
   report() {
@@ -227,7 +313,7 @@ export class Backtest {
     const verification = this.#verification;
     return JSON.parse(json({
       schema: 'bend-backtest-report-v1', status: stale ? 'invalid-terminal-valuation' : 'valid-under-declared-model',
-      ledger, reservations: verifyState(this.#state, this.#config), orders: orders(this.#state),
+      ledger, reservations: this.#reservations, orders: this.orders, recording: { traceMode: this.#options.traceMode },
       performance: { initialEquity: initial, terminalEquity: equity, netPnl: pnl,
         totalReturn: pnl === null ? null : { numerator: pnl, denominator: initial },
         maxDrawdownAtQuoteSamples: this.#valuations.length ? drawdown : null,
@@ -244,13 +330,25 @@ export class Backtest {
 
 // Strategy callback receives a deep-frozen history prefix and current portfolio only.
 // The callback's external closures are outside the information-access boundary.
-function freeze(value) { if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); } return value; }
-export function runStrategy(config, ticks, onTick) {
-  const run = new Backtest(config), history = []; let sequence = 0n, orderId = 0n;
+function freeze(value) {
+  if (value && typeof value === 'object' && !DEEP_FROZEN.has(value)) {
+    Object.values(value).forEach(freeze); Object.freeze(value); DEEP_FROZEN.add(value);
+  }
+  return value;
+}
+// lookback bounds callback-visible history only. Full events remain available
+// for replay/checkpoints. tickCount always counts all consumed market ticks.
+export function runStrategy(config, ticks, onTick, options = {}) {
+  keys(options, ['lookback', 'traceMode', 'orderStorage'], 'strategy options');
+  const lookback = options.lookback;
+  requireThat(lookback === undefined || Number.isSafeInteger(lookback) && lookback > 0, 'STRATEGY_LOOKBACK', 'lookback must be a positive safe integer');
+  const run = new Backtest(config, { ...(options.traceMode === undefined ? {} : { traceMode: options.traceMode }), ...(options.orderStorage === undefined ? {} : { orderStorage: options.orderStorage }) }), history = [];
+  let sequence = 0n, orderId = 0n, tickCount = 0;
   for (const tick of ticks) {
     requireThat(tick.type === 'tick', 'STRATEGY_INPUT', 'runStrategy accepts ticks only');
-    run.step({ ...tick, sequence: String(++sequence) }); history.push(structuredClone(tick));
-    const decisions = onTick(freeze({ history: structuredClone(history), ledger: structuredClone(run.state.ledger), orders: structuredClone(orders(run.state)) })) || [];
+    run.step({ ...tick, sequence: String(++sequence) }); history.push(freeze(structuredClone(tick))); tickCount++;
+    if (lookback !== undefined && history.length > lookback) history.shift();
+    const decisions = onTick(freeze({ history: history.slice(), tickCount, ledger: run.ledger, orders: run.orders })) || [];
     requireThat(Array.isArray(decisions), 'STRATEGY_OUTPUT', 'Strategy must return an array of submit/cancel decisions');
     for (const decision of decisions) {
       requireThat(['submit', 'cancel'].includes(decision.type), 'STRATEGY_OUTPUT', 'Only submit/cancel decisions are supported');

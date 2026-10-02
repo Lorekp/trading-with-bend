@@ -1,17 +1,21 @@
 {
   "name": "trading-with-bend",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/build.mjs && node --test tests/*.test.mjs",
+    "test": "node scripts/build.mjs && node scripts/test-e2e.mjs",
+    "test:e2e": "node scripts/build.mjs && node scripts/test-e2e.mjs",
+    "test:regression": "node --test tests/*.test.mjs",
     "proof": "node scripts/build.mjs --verdict",
     "demo": "node scripts/build.mjs && node src/cli.mjs examples/demo.json",
     "backtest": "node src/cli.mjs",
     "experiments": "node src/experiments-cli.mjs",
     "strategies-demo": "node scripts/build.mjs && node examples/strategies.mjs",
-    "research-demo": "node scripts/build.mjs && node examples/parallel-research.mjs"
+    "research-demo": "node scripts/build.mjs && node examples/parallel-research.mjs",
+    "eth-demo": "node scripts/build.mjs && node scripts/eth-campaign.mjs",
+    "benchmark": "node scripts/benchmark.mjs"
   }
 }

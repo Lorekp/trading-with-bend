@@ -72,6 +72,26 @@ def advance(state: State, time: Nat) -> State:
     case State{ledger, orders}:
       State{ledger, advance_orders(orders, time)}
 
+# Closed-order records live in the host's immutable audit archive. Only working
+# orders need matching/reservation scans; filtering preserves their FIFO order.
+def working_orders(orders: List<&2, Order>) -> List<&2, Order>:
+  match orders:
+    case Nil{}:
+      Nil{}
+    case Con{+head, tail}:
+      match head:
+        case Order{id, side, limit, accepted, remaining, filled, cancelled, decision, arrival, cancel_at}:
+          match remaining:
+            case 0n:
+              working_orders(tail)
+            case 1n+r:
+              Con{head, working_orders(tail)}
+
+def compact_state(state: State) -> State:
+  match state:
+    case State{ledger, orders}:
+      State{ledger, working_orders(orders)}
+
 def reserve_order(order: Order, fee: Nat) -> Nat:
   match order:
     case Order{id, side, limit, accepted, remaining, filled, cancelled, decision, arrival, cancel_at}:

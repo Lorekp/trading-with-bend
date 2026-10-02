@@ -161,3 +161,32 @@ def Laws.future_observations_are_excluded(cutoff, delay, mature):
   %Equal.sym(Bool, Nat.is_lt(Nat.add(cutoff, delay), cutoff), False{}, at_or_after_not_lt(cutoff, delay)) :
     {Bool.and(_, Nat.is_lt(mature, cutoff)) == False{} : Bool}
   {==}
+
+def Laws.unavailable_bars_cannot_supply_execution(execution, delay, open):
+  %Equal.sym(Bool, Nat.is_lt(Nat.add(execution, delay), execution), False{}, at_or_after_not_lt(execution, delay)) :
+    {Bool.and(_, Nat.is_lt(open, execution)) == False{} : Bool}
+  {==}
+
+def Laws.bar_open_must_precede_execution(execution, delay, available):
+  %Equal.sym(Bool, Nat.is_lt(Nat.add(execution, delay), execution), False{}, at_or_after_not_lt(execution, delay)) :
+    {Bool.and(Nat.is_lt(available, execution), _) == False{} : Bool}
+  and_false(Nat.is_lt(available, execution))
+
+def Laws.ready_bar_executes_after_delay(open, delay):
+  match open:
+    case 0n:
+      {==}
+    case 1n+p:
+      Laws.ready_bar_executes_after_delay(p, delay)
+
+def Laws.compaction_preserves_ledger(ledger, orders):
+  {==}
+
+def Laws.working_orders_empty():
+  {==}
+
+def Laws.closed_orders_are_removed(id, side, limit, accepted, filled, cancelled, decision, arrival, cancel_at, tail):
+  {==}
+
+def Laws.working_orders_keep_fifo(id, side, limit, accepted, remaining, filled, cancelled, decision, arrival, cancel_at, tail):
+  {==}

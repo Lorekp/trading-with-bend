@@ -4,6 +4,8 @@ A runnable, proof-oriented backtesting reference framework. The **actual account
 
 For parallel strategy agents and ML research, start with [the shared research guide](docs/RESEARCH.md) and `AGENTS.md`. The toolkit now includes a durable parallel job queue, programmatic strategies, causal features, ridge/OLS training, purged walk-forward evaluation, persistent final-holdout gates, parameter grids and reusable artifact checks. `src/index.mjs` exports the shared API.
 
+For the downloaded ETHUSDT data, use [the ETH experiment guide](docs/ETH_EXPERIMENTS.md). `npm run eth-demo` runs six registered rule/ML scenarios over September's 43,200 minute candles, resampled into 8,640 completed five-minute bars. The source is **USD-M perpetual data with missing bookTicker**; these runs explicitly use a cash-only price proxy with assumed execution, not perpetual-futures accounting.
+
 The first implementation is deliberately one cash-only spot instrument, integer lots and ordinary limit orders. It implements the starting scope from the supplied specification. It is a reference simulator, not a claim about market realism or profitable strategies.
 
 ## Run it
@@ -13,6 +15,7 @@ The current workspace is already set up. From the repository root:
 ```powershell
 npm run demo
 npm test
+npm run eth-demo
 npm run backtest -- examples/demo.json --out output/my-report.json
 ```
 
@@ -52,7 +55,7 @@ node scripts/download-binance.mjs 2026-09
 
 Files are saved under `data/binance/um/ETHUSDT/2026-09/`, with a coverage and checksum `manifest.json`. The downloader tries monthly archives for all seven requested datasets, falling back to daily archives only on HTTP 404. Missing dates are recorded and an incomplete run exits with code 2. Rerunning rechecks existing ZIPs against current vendor checksums. Downloads remain `.part` files until accepted; ZIPs stay compressed.
 
-`bend/Archive.bend` enforces nonzero exact byte length and equality of all eight SHA-256 words. Node handles HTTP, strict checksum filename parsing, streaming cryptographic hashing and file writes; those host operations are outside the Bend proof boundary. The new archive policy is compiler checked and tested, but has no additional formal laws. These raw perpetual archives are not converted to the framework's cash-only spot events.
+`bend/Archive.bend` enforces nonzero exact byte length and equality of all eight SHA-256 words. Node handles HTTP, strict checksum filename parsing, streaming cryptographic hashing and file writes; those host operations are outside the Bend proof boundary. The archive policy is compiler checked and tested, but has no additional formal laws. `loadBinanceBars` now verifies and streams the small candle ZIPs directly, preserving exact units and declared coverage; `loadBinanceSeries` reads mark/index/premium prices and funding observations. The bar bridge converts candles only into an explicitly labeled cash-price proxy scenario. Bulk trades are not loaded by this adapter.
 
 Copy `examples/demo.json`. All integer quantities, prices, timestamps and sequence numbers must be **decimal strings**, never JSON numbers. Every event has a unique `id`, globally increasing `sequence`, nondecreasing millisecond `time`, and the configured `symbol` and `currency`.
 
@@ -92,7 +95,9 @@ const simulated = runStrategy(input.config, ticks, ({ history }) =>
 
 ## Checks and proof boundary
 
-`npm test` builds the engine, checks accounting and research-policy Bend laws, and runs the full integration suite, including 500 exact ledger comparisons, 60 randomized FIFO scenarios, analytic numerical references, deliberate failing proof mutations and real competing experiment processes. Build evidence is bound to hashes of the Bend sources and generated modules; stale builds cannot start a backtest. Provenance is captured for the loaded implementation and remains stable throughout a run. Builds hold an exclusive lock and reject source changes during verification.
+`npm test` builds the engine and runs the E2E-first suite: ZIP ingestion through real strategy fills and immutable reports, separate rule/ML worker processes, optimized/reference replay, checkpoint restoration, malformed-data/tampering rejection, deliberate failing proof mutations and competing experiment processes. Downloaded-data checks run automatically when the September manifest is present. `npm run test:regression` retains the older focused accounting, numerical and policy checks. New behavior should be tested through complete workflows.
+
+Build evidence is bound to hashes of the Bend sources and generated modules; stale builds cannot start a backtest. Provenance is captured for the loaded implementation and remains stable throughout a run. Builds hold an exclusive lock and reject source changes during verification. For large runs, use `runStrategy(..., { lookback: 64, traceMode: 'compact', orderStorage: 'active' })`. The ETH bridge uses bounded history, compact recording and active storage by default, retaining all fills and final order records.
 
 ```powershell
 npm run proof

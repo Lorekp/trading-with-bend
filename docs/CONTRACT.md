@@ -64,3 +64,28 @@ Reports include dataset/config/source hashes, toolchain, runtime, strategy and p
 - Labels available at/after cutoff are excluded; observations available at/after cutoff are excluded.
 
 These extend the ten engine laws. They do not prove filesystem claims, arbitrary callback data access, numerical model quality or all orchestration code. Concurrency and artifact correctness are checked using real subprocess races, timeouts, crashes, recovery and tampering tests. See [RESEARCH.md](RESEARCH.md) for APIs and operational limits.
+
+## Completed bars and optimized storage
+
+The additional bar timing policy requires execution strictly after both the
+supplied information-availability timestamp and next-open timestamp. Two laws
+exclude unavailable/same-time inputs; a positive law requires ready bars to pass
+after a positive delay. These specify timing, not the truth of vendor timestamps
+or executable prices. The explicit cash-price proxy assumptions and integer
+rounding rules are in [ETH_EXPERIMENTS.md](ETH_EXPERIMENTS.md).
+
+Four compaction laws specify an empty working list, removal of zero-remaining
+orders, retention of positive-remaining orders in FIFO order, and preservation
+of the ledger. The host independently checks the returned compact state and
+maintains completed-order records, including pending cancellation metadata.
+This brings the project specification to 25 laws. Host archive handling and
+equivalence of full replay remain E2E-tested properties, not whole-engine
+theorems. Proof mutation tests require broken implementations to be rejected by
+the relevant specification, including a predicate that prohibits every bar fill
+and a filter that fabricates an order from an empty list.
+
+`orderStorage: 'active'` changes internal storage only; public final orders and
+the full state retain the audit history. `traceMode: 'compact'` omits order arrays
+from each trace sample and therefore intentionally changes the trace hash.
+Comparisons use the same trace mode. Checkpoints record these options and still
+replay all accepted events; they do not capture stateful bar-strategy models.
