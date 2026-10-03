@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { Backtest, orders } from '../../src/framework.mjs';
 import { MAX_NAT } from '../../src/core.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion, targetPosition } from '../../src/strategies.mjs';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { hash, json } from '../../src/core.mjs';
@@ -18,7 +18,10 @@ import { quoteInformationSource, InformationSource } from '../../src/information
 import { QuoteExecutionVenue } from '../../src/execution-venue.mjs';
 import { runStrategy as replay } from '../../src/replay.mjs';
 import { sampleEquity } from '../../src/study.mjs';
-import { listExperiments, readExperimentResult } from '../../src/experiments.mjs';
+import { listExperiments, readExperimentResult, verifyExperiment } from '../../src/experiments.mjs';
+import { resolveProtocol, pairSchedule } from '../../experiments/speed/protocol.mjs';
+import { summarizeComparison } from '../../experiments/speed/statistics.mjs';
+import { runBenchmark } from '../../experiments/speed/benchmark.mjs';
 import { runMemoryBenchmark } from '../../experiments/memory/benchmark.mjs';
 
 test('default storage keeps historical orders out of matching across 6000 submit/cancel cycles', () => {
@@ -490,7 +493,11 @@ test('a durability failure after writing manifest bytes cannot publish an audit 
     let injected = 0;
     fs.writeFileSync = (path, ...args) => {
       const result = original(path, ...args);
-      if (dirname(String(path)) === directory && String(path).includes('.json')) {
+      // Publication writes a synchronized temporary descriptor. Identify the
+      // audit manifest by its bytes so a failed write cannot commit it.
+      let manifest;
+      try { manifest = JSON.parse(String(args[0])); } catch {}
+      if (manifest?.format === 'bend-replay-audit-v2') {
         injected++;
         throw Object.assign(new Error('Durability failure after manifest bytes were written'), { code: 'EIO' });
       }
@@ -560,6 +567,16 @@ test('admitted quotes supply independent reusable cursors and reserve future mar
   const a = informationSource.observations(), b = informationSource.observations();
   assert.equal(a.next().value.data.id, quotes[0].id); assert.equal(a.next().value.data.id, quotes[1].id);
   assert.equal(b.next().value.data.id, quotes[0].id); a.return(); b.return();
+  const lead = dataset.rows(), lag = dataset.rows();
+  assert.deepEqual(lag.next().value, quotes[0]);
+  for (const quote of quotes) assert.deepEqual(lead.next().value, quote);
+  assert.equal(lead.next().done, true);
+  for (const quote of quotes.slice(1)) {
+    const row = lag.next().value;
+    assert.deepEqual(row, quote);
+    assert.throws(() => { row.bid = '99999'; }, TypeError);
+  }
+  assert.equal(lag.next().done, true, 'A lagging cursor completes after another cursor crosses every chunk');
   const venue = new QuoteExecutionVenue({ id: 'clock-venue', config, ticks: dataset, maxPositionLots: '2', auditDirectory: join(root, 'clock-replay') });
   auditCleanup(t, () => venue.abort());
   const source = new InformationSource({ id: 'clock-source', instrument: config.instrument,
@@ -617,7 +634,7 @@ test('five campaign workers reuse one admitted dataset and match independent mem
   const datasetHash = data.manifest.datasetHash, manifestPath = data.manifest.audit.manifestPath;
   data.close();
   const admittedBytes = readFileSync(manifestPath), campaign = join(root, 'campaign');
-  const result = spawnSync(process.execPath, ['scripts/benchmark.mjs', '--suite', 'campaign-v1', '--output', campaign,
+  const result = spawnSync(process.execPath, ['scripts/benchmark-memory.mjs', '--suite', 'campaign-v1', '--output', campaign,
     '--dataset', manifestPath, '--ticks', String(count), '--workers', '5', '--jobs', '5', '--repetitions', '1',
     '--node-options', '--max-old-space-size=128', '--order-every', String(orderEvery)], {
     encoding: 'utf8', timeout: 90000, windowsHide: true,
@@ -712,4 +729,167 @@ test('memory benchmark retains every timeout and excludes failed peaks from succ
     assert.ok(existsSync(join(summary.outputDirectory, row.id, 'completion.json')));
     assert.ok(row.metrics[0].value > 0, 'Failure measurements remain in the raw population');
   }
+});
+
+test('speed benchmark bootstraps whole pairs and withholds incomplete or diagnostic conclusions', () => {
+  const protocol = resolveProtocol({ schema: 'speed-benchmark-v1', suite: 'quote-replay-v1', profile: 'release',
+    datasetSeed: 1, scheduleSeed: 12345, analysisSeed: 67890 });
+  const samples = [];
+  const schedule = pairSchedule(protocol);
+  for (const caseId of protocol.cases) for (let pair = 0; pair < protocol.pairs; pair++) {
+    // Strong pair-level variation must cancel in a constant paired ratio.
+    const duration = 2 ** (pair % 10);
+    for (const target of schedule.find(row => row.caseId === caseId && row.pair === pair).order) samples.push({ caseId, pair, target, stage: 'measurement',
+      status: 'completed', evidenceHash: hash('same-evidence'), jobWallMs: duration * (target === 'candidate' ? 0.8 : 1) });
+  }
+  const summary = summarizeComparison(protocol, samples);
+  for (const row of summary) {
+    assert.equal(row.completedPairs, protocol.pairs);
+    assert.equal(row.conclusion, 'improvement');
+    assert.ok(Math.abs(row.timeRatio - 0.8) < 1e-12);
+    assert.ok(row.timeRatio95PercentInterval.every(value => Math.abs(value - 0.8) < 1e-12));
+  }
+  const failed = structuredClone(samples); failed[0].status = 'failed';
+  const incomplete = summarizeComparison(protocol, failed)[0];
+  assert.equal(incomplete.completedPairs, protocol.pairs - 1);
+  assert.equal(incomplete.conclusion, 'incomplete');
+  assert.equal(incomplete.eligibleForInference, false);
+  const mismatched = structuredClone(samples); mismatched[0].evidenceHash = hash('different');
+  assert.equal(summarizeComparison(protocol, mismatched)[0].conclusion, 'incomplete');
+  for (const [ratio, conclusion] of [[1, 'within-tolerance'], [1.2, 'regression']]) {
+    const changed = samples.map(row => ({ ...row, jobWallMs: row.target === 'candidate' ? row.jobWallMs / 0.8 * ratio : row.jobWallMs }));
+    assert.ok(summarizeComparison(protocol, changed).every(row => row.conclusion === conclusion));
+  }
+  assert.throws(() => summarizeComparison(protocol, [...samples, samples[0]]), { code: 'BENCHMARK_SAMPLES' });
+  for (const profile of ['smoke', 'pilot']) {
+    const diagnostic = resolveProtocol({ schema: 'speed-benchmark-v1', suite: 'quote-replay-v1', profile,
+      datasetSeed: 1, scheduleSeed: 12345, analysisSeed: 67890 });
+    const rows = summarizeComparison(diagnostic, samples.filter(row => row.pair < diagnostic.pairs));
+    assert.ok(rows.every(row => !row.eligibleForInference && row.conclusion === `${profile}-only`));
+  }
+});
+
+test('speed benchmark freezes calibrated protocols and screens order effects and drift', () => {
+  const input = { schema: 'speed-benchmark-v1', suite: 'quote-replay-v1', profile: 'release',
+    datasetSeed: 1, scheduleSeed: 12345, analysisSeed: 67890, pairs: 60, timeoutMs: 600000 };
+  const calibrated = resolveProtocol(input);
+  assert.equal(calibrated.pairs, 60); assert.equal(calibrated.timeoutMs, 600000);
+  assert.deepEqual(resolveProtocol(JSON.parse(JSON.stringify(calibrated))), calibrated);
+  assert.throws(() => resolveProtocol({ ...calibrated, lookback: 1 }), { code: 'BENCHMARK_PROTOCOL' });
+  assert.throws(() => resolveProtocol({ ...calibrated, extra: true }), { code: 'BENCHMARK_PROTOCOL' });
+  for (const invalid of [{ pairs: 1 }, { pairs: 1.5 }, { timeoutMs: 9999 }]) {
+    assert.throws(() => resolveProtocol({ ...input, ...invalid }), { code: 'BENCHMARK_BUDGET' });
+  }
+  const protocol = resolveProtocol({ ...input, pairs: 20 });
+  const schedule = pairSchedule(protocol);
+  const makeRows = timing => schedule.flatMap(({ caseId, pair, order }, index) => order.map((target, position) => ({
+    caseId, pair, target, stage: 'measurement', status: 'completed', evidenceHash: hash('same'),
+    jobWallMs: timing({ index, target, order, position }),
+  })));
+  // Identical versions: the second member always takes half as long. AB happens in a slower regime.
+  const confounded = makeRows(({ order, position }) => (order[0] === 'baseline' ? 200 : 20) * (position ? 0.5 : 1));
+  for (const row of summarizeComparison(protocol, confounded)) {
+    assert.ok(row.timeRatio95PercentInterval[1] < 0.95);
+    assert.equal(row.conclusion, 'requires-review'); assert.equal(row.eligibleForInference, false);
+    assert.ok(row.diagnostics.issues.includes('order-effect'));
+    assert.equal(row.diagnostics.orderGroups.AB.timeRatio, 0.5);
+    assert.equal(row.diagnostics.orderGroups.BA.timeRatio, 2);
+  }
+  const drift = makeRows(({ index, target }) => (index < schedule.length / 2 ? 100 : 200) * (target === 'candidate' ? 0.8 : 1));
+  for (const row of summarizeComparison(protocol, drift)) {
+    assert.equal(row.conclusion, 'requires-review'); assert.equal(row.eligibleForInference, false);
+    assert.ok(row.diagnostics.issues.includes('baseline-drift'));
+    assert.ok(row.diagnostics.issues.includes('candidate-drift'));
+  }
+  const stable = makeRows(({ target }) => target === 'candidate' ? 80 : 100);
+  assert.ok(summarizeComparison(protocol, stable).every(row => row.conclusion === 'improvement' && row.diagnostics.status === 'passed'));
+});
+
+test('speed benchmark rejects matching target harnesses that differ from the controller', async t => {
+  const root = auditDirectory(t), target = join(root, 'target'), output = join(root, 'comparison');
+  cpSync(resolve('experiments/speed'), join(target, 'experiments/speed'), { recursive: true });
+  const worker = join(target, 'experiments/speed/worker.mjs');
+  writeFileSync(worker, readFileSync(worker, 'utf8').replace('strategy, { lookback })', 'strategy, { lookback: 1 })'));
+  await assert.rejects(runBenchmark({ schema: 'speed-benchmark-v1', suite: 'quote-replay-v1', profile: 'smoke',
+    datasetSeed: 1, scheduleSeed: 12345, analysisSeed: 67890 },
+  { baselineRoot: target, candidateRoot: target, outputDirectory: output }), { code: 'BENCHMARK_HARNESS' });
+  assert.equal(existsSync(output), false, 'Reject a different workload before creating attempts');
+});
+
+test('speed benchmark runs isolated A/A pairs with complete evidence and records a real worker failure', { timeout: 120000 }, t => {
+  const root = auditDirectory(t), output = join(root, 'speed');
+  const execute = args => spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 90000, windowsHide: true });
+  const run = execute(['scripts/benchmark.mjs', '--profile', 'smoke', '--output', output]);
+  assert.ifError(run.error); assert.equal(run.status, 0, `${run.stderr}\n${run.stdout}`);
+  const report = JSON.parse(readFileSync(join(output, 'summary.json'), 'utf8'));
+  const samples = JSON.parse(readFileSync(join(output, 'samples.json'), 'utf8'));
+  assert.equal(report.status, 'completed'); assert.equal(report.comparisonType, 'A/A');
+  assert.ok(report.comparisons.every(row => row.completedPairs === 2 && row.conclusion === 'smoke-only' && !row.eligibleForInference));
+  const measured = samples.filter(row => row.stage === 'measurement');
+  assert.equal(measured.length, 8);
+  assert.equal(new Set(samples.map(row => row.workerPid)).size, samples.length);
+  assert.equal(new Set(samples.map(row => row.registry)).size, samples.length);
+  for (const row of samples) {
+    assert.equal(row.status, 'completed'); assert.equal(row.seed, 1);
+    assert.ok(row.buys > 0 && row.sells > 0);
+    assert.equal(row.metrics.observationCount, 1024);
+    assert.equal(row.metrics.runtime.nodeOptions, '--max-old-space-size=256');
+    assert.equal(row.metrics.workload.lookback, 256);
+    assert.equal(row.metrics.workload.traceMode, 'compact');
+    assert.equal(row.metrics.workload.orderStorage, 'active');
+    assert.deepEqual(row.metrics.runtime.execArgv, []);
+    assert.ok(row.metrics.runtime.heapLimitBytes >= 256 * 1048576);
+    assert.equal(readExperimentResult(row.registry, row.key).traceHash, row.metrics.traceHash);
+  }
+  assert.ok(measured.some(row => !Number.isInteger(row.jobWallMs)), 'Raw timings retain fractional milliseconds');
+  const savedProtocol = JSON.parse(readFileSync(join(output, 'protocol.json'), 'utf8'));
+  assert.deepEqual(resolveProtocol(savedProtocol), savedProtocol);
+  const rerun = execute(['scripts/benchmark.mjs', '--protocol', join(output, 'protocol.json'), '--output', join(root, 'rerun')]);
+  assert.ifError(rerun.error); assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
+  const protocol = JSON.parse(readFileSync(join(output, 'run.json'), 'utf8'));
+  assert.deepEqual(protocol.harnesses.baseline, protocol.harnesses.controller);
+  assert.deepEqual(protocol.harnesses.candidate, protocol.harnesses.controller);
+  assert.deepEqual(protocol.schedule, pairSchedule(protocol));
+  const observedOrder = measured.map(({ caseId, pair, target }) => ({ caseId, pair, target }));
+  assert.deepEqual(observedOrder, protocol.schedule.flatMap(({ caseId, pair, order }) => order.map(target => ({ caseId, pair, target }))));
+  for (const caseId of protocol.cases) for (let pair = 0; pair < 2; pair++) {
+    const members = measured.filter(row => row.caseId === caseId && row.pair === pair);
+    assert.equal(members[0].evidenceHash, members[1].evidenceHash);
+    assert.equal(members[0].inputHash, members[1].inputHash);
+  }
+  // A changed dependency cannot silently turn into another admissible trial.
+  const dependency = protocol.datasets[protocol.cases[0]].manifestPath, bytes = readFileSync(dependency);
+  writeFileSync(dependency, Buffer.concat([bytes, Buffer.from(' ')]));
+  assert.throws(() => verifyExperiment(listExperiments(measured.find(row => row.caseId === protocol.cases[0]).registry)[0]), { code: 'DEPENDENCY_CHANGED' });
+  writeFileSync(dependency, bytes);
+
+  // Profiling reuses exact saved work in a separate registry, never timing samples.
+  const selected = measured[0], profilingRegistry = join(root, 'profiling-registry');
+  const timingBytes = readFileSync(join(output, 'samples.json'));
+  const profiling = execute(['experiments/hillclimb/profile.mjs',
+    join(output, 'attempts/measurement', selected.caseId, String(selected.pair), selected.target, 'execution/request.json'), profilingRegistry]);
+  assert.ifError(profiling.error); assert.equal(profiling.status, 0, `${profiling.stderr}\n${profiling.stdout}`);
+  const profiled = JSON.parse(profiling.stdout).result;
+  assert.equal(profiled.eligibleForTimingInference, false);
+  assert.equal(profiled.traceHash, selected.metrics.traceHash);
+  assert.equal(profiled.targetsHash, selected.metrics.targetsHash);
+  assert.deepEqual(profiled.counts, selected.metrics.counts);
+  assert.equal(profiled.runtime.nodeOptions, '--max-old-space-size=256');
+  const profilingJob = listExperiments(profilingRegistry)[0];
+  const cpuProfile = JSON.parse(readFileSync(join(profilingJob.attempts[0].outputDirectory, 'profile.cpuprofile'), 'utf8'));
+  assert.ok(cpuProfile.nodes.length > 0 && cpuProfile.samples.length > 0);
+  assert.deepEqual(readFileSync(join(output, 'samples.json')), timingBytes);
+
+  const requestPath = join(root, 'failure-request.json'), registry = join(root, 'failure-registry');
+  const data = protocol.datasets[protocol.cases[0]];
+  writeFileSync(requestPath, JSON.stringify({ action: 'run', responsePath: join(root, 'failure-response.json'), registry,
+    key: 'speed/failing-input', protocolPath: join(output, 'protocol.json'), timeoutMs: 10000,
+    configuration: { manifestPath: data.manifestPath, inputHash: hash('wrong-input'), count: 1024,
+      caseId: protocol.cases[0], seed: 1, orderEvery: 32, lookback: 256 } }));
+  const failure = execute(['experiments/speed/runner.mjs', requestPath]);
+  assert.ifError(failure.error); assert.equal(failure.status, 1);
+  const jobs = listExperiments(registry);
+  assert.equal(jobs.length, 1); assert.equal(jobs[0].status, 'failed');
+  assert.equal(jobs[0].attempts[0].error.code, 'BENCHMARK_INPUT');
+  assert.equal(existsSync(join(jobs[0].attempts[0].outputDirectory, 'report.json')), false);
 });

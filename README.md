@@ -2,7 +2,9 @@
 
 A runnable, proof-oriented backtesting reference framework. The **cash accounting, order admission, reservations, cancellation and FIFO matching engine is written in Bend**. Node handles validated JSON input, strategy callbacks, checkpoints, reports and experiment registration around the compiled Bend module. Archive readers use the locked `tar-stream` and `yauzl` dependencies.
 
-For parallel strategy agents and ML research, start with [the shared research guide](docs/RESEARCH.md) and `AGENTS.md`. The toolkit now includes a durable parallel job queue, programmatic strategies, causal features, ridge/OLS training, purged walk-forward evaluation, persistent final-holdout gates, parameter grids and reusable artifact checks. `src/index.mjs` exports the shared API.
+For parallel strategy agents and ML research, start with [the shared research guide](docs/RESEARCH.md) and `AGENTS.md`. Official campaigns own the complete trial population, shared resource admission, frozen workers/input snapshots, cancellation and verified final release. The toolkit also includes programmatic strategies, causal features, ridge/OLS training, purged walk-forward evaluation, parameter grids and reusable validation-fold evidence. `src/index.mjs` exports the shared API.
+
+Demanding local swarms should use [`createCampaign`](docs/RESEARCH.md#official-campaigns), one shared admission budget and a canonical final authority directory. Filesystem-constrained workers are the default; foreign/Python training requires an explicitly trusted campaign. Admission estimates and V8 heap limits are not OS resource quotas. After building, `node --test tests/e2e/swarm.test.mjs` runs the profiled 34-trial acceptance workflow. Multi-host execution is unsupported.
 
 For the downloaded ETHUSDT data, use [the ETH experiment guide](docs/ETH_EXPERIMENTS.md). `npm run eth-demo` runs six registered rule/ML scenarios over September's 43,200 minute candles, resampled into 8,640 completed five-minute bars. The source is **USD-M perpetual data with missing bookTicker**; these runs explicitly use a cash-only price proxy with assumed execution, not perpetual-futures accounting.
 
@@ -129,9 +131,9 @@ Build evidence is bound to hashes of the Bend sources and generated modules; sta
 Measure complete workloads in fresh process groups:
 
 ```powershell
-npm run benchmark -- --suite smoke-v1 --output output/memory/smoke
-npm run benchmark -- --suite replay-v1 --ticks 250000 --repetitions 7 --output output/memory/replay
-npm run benchmark -- --suite controls-v1 --ticks 250000 --output output/memory/controls
+npm run benchmark:memory -- --suite smoke-v1 --output output/memory/smoke
+npm run benchmark:memory -- --suite replay-v1 --ticks 250000 --repetitions 7 --output output/memory/replay
+npm run benchmark:memory -- --suite controls-v1 --ticks 250000 --output output/memory/controls
 ```
 
 Use new output directories. The benchmark records preparation separately, observes
@@ -143,10 +145,40 @@ separate explanatory metric. See [the benchmark guide](docs/MEMORY_BENCHMARK.md)
 The [measured results](docs/MEMORY_BENCHMARK_RESULTS.md) record repeated
 two-million-quote serial and five-worker runs on Windows.
 
+Measure paired execution speed in fresh processes:
+
+```powershell
+npm run benchmark -- --profile smoke
+npm run benchmark -- --profile pilot
+npm run benchmark -- --baseline C:/bench/base --candidate C:/bench/change --output output/benchmarks/comparison-001
+node scripts/profile-replay.mjs --ticks 200000 --orders 1000 --lookback 64 --profile
+```
+
+Build both targets first and give them identical `experiments/speed/` harnesses.
+Without target paths, the benchmark runs an A/A comparison in this checkout.
+It measures fresh-process job completion including complete disk audits and
+durable reports, using randomized serial pairs and verified identical evidence.
+The release profile runs twenty pairs for each of two 200,000-quote cases;
+the five-pair pilot and small smoke profile provide diagnostic results.
+Inputs, raw attempts, phase timings, CPU deltas, lifetime peak RSS and paired
+bootstrap intervals remain under the printed fresh output directory. No profiler
+runs during comparison. `scripts/profile-replay.mjs` is the separate single-run
+diagnostic; use fresh directories for its disk input and audit options.
+
+After a pilot, protocol JSON can freeze a larger `pairs` budget and `timeoutMs`.
+Saved `protocol.json` can be reused with `--protocol` and a fresh output directory;
+`run.json` records each execution's inputs, host and schedule. All three harnesses
+(controller, baseline and candidate) must match. Release conclusions are withheld
+when the recorded order-effect or drift screens require review.
+
+See the [benchmark methodology research](docs/BENCHMARK-RESEARCH.md) and
+[repeated-comparison design](docs/BENCHMARK.md) for the protocol covering
+fresh processes, representative workloads, correctness gates and uncertainty.
+
 For five concurrent tick workers sharing one admitted dataset:
 
 ```powershell
-npm run benchmark -- --suite campaign-v1 --ticks 2000000 --workers 5 --jobs 5 --order-every 32 --node-options '--max-old-space-size=128' --output output/memory/campaign
+npm run benchmark:memory -- --suite campaign-v1 --ticks 2000000 --workers 5 --jobs 5 --order-every 32 --node-options '--max-old-space-size=128' --output output/memory/campaign
 ```
 
 This creates registered worker attempts, complete disk audits and a summary

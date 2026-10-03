@@ -149,11 +149,18 @@ instead of silently mixing versions.
 
 ## Performance and checks
 
-`scripts/benchmark.mjs` measures fresh process groups and retains raw attempts.
+`scripts/benchmark-memory.mjs` measures fresh process groups and retains raw attempts.
 See [the memory benchmark guide](MEMORY_BENCHMARK.md). For example:
 
 ```powershell
-npm run benchmark -- --suite replay-v1 --ticks 43000 --order-every 86 --repetitions 7
+npm run benchmark:memory -- --suite replay-v1 --ticks 43000 --order-every 86 --repetitions 7
+```
+
+`scripts/profile-replay.mjs` accepts `--ticks`, `--orders`, `--lookback`, `--trace`,
+`--order-storage`, and optional `--profile`. For example:
+
+```powershell
+node scripts/profile-replay.mjs --ticks 43000 --orders 500 --lookback 64 --trace compact --order-storage active
 ```
 
 Bounded history avoids cloning an ever-growing prefix. Immutable state reuse

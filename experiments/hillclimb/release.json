@@ -1,0 +1,63 @@
+{
+  "schema": "speed-benchmark-resolved-v1",
+  "suite": "quote-replay-v1",
+  "profile": "release",
+  "datasetSeed": 1,
+  "scheduleSeed": 12345,
+  "analysisSeed": 67890,
+  "ticks": 200000,
+  "pairs": 20,
+  "primaryCase": "quotes-variable-dense",
+  "cases": [
+    "quotes-variable-dense",
+    "quotes-constant-dense"
+  ],
+  "generator": "syntheticQuotes/xorshift32-v1",
+  "orderEvery": 32,
+  "lookback": 256,
+  "traceMode": "compact",
+  "orderStorage": "active",
+  "reportDetail": "summary",
+  "instrument": {
+    "symbol": "BENCH",
+    "currency": "USDT",
+    "lotSize": "0.001",
+    "priceTick": "1"
+  },
+  "quoteParameters": {
+    "quotes-variable-dense": {
+      "initialBid": "10000",
+      "spreadTicks": "1",
+      "stepMs": "1",
+      "volatilityTicks": "3",
+      "minLots": "1",
+      "maxLots": "100"
+    },
+    "quotes-constant-dense": {
+      "initialBid": "10000",
+      "spreadTicks": "1",
+      "stepMs": "1",
+      "volatilityTicks": "0",
+      "minLots": "100",
+      "maxLots": "100"
+    }
+  },
+  "execution": {
+    "initialCash": "100000000",
+    "feePerLot": "1",
+    "orderLatencyMs": "0",
+    "cancelLatencyMs": "0",
+    "maxQuoteAgeMs": "60000"
+  },
+  "timeoutMs": 300000,
+  "heapMiB": 256,
+  "cachePolicy": "pre-read",
+  "warmupIterations": 0,
+  "bootstrapDraws": 10000,
+  "practicalThreshold": 0.05,
+  "diagnosticPolicy": {
+    "orderEffectThreshold": 0.05,
+    "driftThreshold": 0.05,
+    "minimumStratumPairs": 2
+  }
+}

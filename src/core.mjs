@@ -24,10 +24,29 @@ export function checked(n, name) {
   return n;
 }
 export const json = value => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
+// Cache field layout only, never values: mutable inputs are serialized afresh.
+// Bound both layout count and size so arbitrary metadata cannot grow the cache.
+const canonicalLayouts = new Map();
 export function canonical(value) {
   if (typeof value === 'bigint') return JSON.stringify(value.toString());
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value), layout = JSON.stringify(keys);
+    let fields = canonicalLayouts.get(layout);
+    if (!fields) {
+      fields = keys.sort().map(key => [key, JSON.stringify(key)]);
+      if (layout.length <= 2048 && keys.length <= 64) {
+        if (canonicalLayouts.size === 128) canonicalLayouts.clear();
+        canonicalLayouts.set(layout, fields);
+      }
+    }
+    let encoded = '{', separator = '';
+    for (const [key, label] of fields) {
+      encoded += `${separator}${label}:${canonical(value[key])}`;
+      separator = ',';
+    }
+    return `${encoded}}`;
+  }
   return JSON.stringify(value);
 }
 export const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonical(value)).digest('hex');
@@ -56,7 +75,8 @@ const DEEP_FROZEN = new WeakSet();
 
 export function freeze(value) {
   if (value && typeof value === 'object' && !DEEP_FROZEN.has(value)) {
-    Object.values(value).forEach(freeze); Object.freeze(value); DEEP_FROZEN.add(value);
+    for (const child of Object.values(value)) if (child && typeof child === 'object') freeze(child);
+    Object.freeze(value); DEEP_FROZEN.add(value);
   }
   return value;
 }

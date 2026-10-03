@@ -1,15 +1,15 @@
 # Running the memory benchmark
 
 The benchmark is implemented by `runMemoryBenchmark(plan, { outputDirectory })`
-in `experiments/memory/benchmark.mjs`. `npm run benchmark` is its command-line
+in `experiments/memory/benchmark.mjs`. `npm run benchmark:memory` is its command-line
 interface. Build once before starting a study; do not edit toolkit or benchmark
 sources while it runs. Every run needs a new output directory.
 
 ```powershell
 npm run build
-npm run benchmark -- --suite smoke-v1 --output output/memory/smoke
-npm run benchmark -- --suite replay-v1 --ticks 2000000 --repetitions 7 --output output/memory/replay-2m
-npm run benchmark -- --suite campaign-v1 --ticks 2000000 --jobs 5 --workers 5 --repetitions 7 --output output/memory/campaign-2m
+npm run benchmark:memory -- --suite smoke-v1 --output output/memory/smoke
+npm run benchmark:memory -- --suite replay-v1 --ticks 2000000 --repetitions 7 --output output/memory/replay-2m
+npm run benchmark:memory -- --suite campaign-v1 --ticks 2000000 --jobs 5 --workers 5 --repetitions 7 --output output/memory/campaign-2m
 ```
 
 | Suite | Work |

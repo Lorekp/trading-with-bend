@@ -44,11 +44,12 @@ export class QuoteExecutionVenue {
     requireThat(!this.#finished && (this.#time === null || now >= this.#time), 'VENUE_TIME', 'Venue time must advance on an unfinished replay');
     while (!this.#next.done && BigInt(this.#next.value.time) <= now) {
       const tick = this.#next.value;
-      this.backtest.step({ ...tick, sequence: String(++this.#sequence) });
+      // Venue-owned events can use Backtest's existing immutable-copy path.
+      this.backtest.step(freezeData({ ...tick, sequence: String(++this.#sequence) }));
       this.#quote = tick;
       this.#next = this.#iterator.next();
     }
-    if (this.backtest.lastTime !== now) this.backtest.step({ ...this.#base(`venue-clock-${this.#sequence + 1n}`, time), type: 'clock' });
+    if (this.backtest.lastTime !== now) this.backtest.step(freezeData({ ...this.#base(`venue-clock-${this.#sequence + 1n}`, time), type: 'clock' }));
     this.#time = now;
   }
   snapshot() {
@@ -100,7 +101,7 @@ export class QuoteExecutionVenue {
     for (const decision of decisions) {
       const event = { ...decision, ...this.#base(`strategy-${this.#sequence + 1n}`, time) };
       if (decision.type === 'submit') event.orderId = String(++this.#orderId);
-      this.backtest.step(event);
+      this.backtest.step(freezeData(event));
     }
   }
   finish(time) {

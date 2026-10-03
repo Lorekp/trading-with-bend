@@ -131,7 +131,7 @@ Measurement logs belong to the outer driver, because they continue after worker
 publication and must survive worker failure. Bind their final hashes to the
 benchmark summary, separately from the registry's immutable attempt artifacts.
 
-At implementation, make `scripts/benchmark.mjs` the thin CLI for this module,
+At implementation, make `scripts/benchmark-memory.mjs` the thin CLI for this module,
 remove `scripts/benchmark-campaign.mjs`, and update its existing test and documented
 invocations. Move the reusable scaling workload/helpers into `experiments/memory/`
 and remove the obsolete worker. Keep one measurement path rather than retaining

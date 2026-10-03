@@ -85,13 +85,14 @@ is claimed for these capacity runs.
 
 ## Reproduction and artifacts
 
-Build once, then use new output directories. The executed capacity commands were:
+Build once, then use new output directories. The capacity commands below use the
+current `scripts/benchmark-memory.mjs` name (originally `scripts/benchmark.mjs`):
 
 ```powershell
-node scripts/benchmark.mjs --suite replay-v1 --ticks 2000000 --repetitions 7 --sample-ms 0 --output output/memory/replay-2m-seven
+node scripts/benchmark-memory.mjs --suite replay-v1 --ticks 2000000 --repetitions 7 --sample-ms 0 --output output/memory/replay-2m-seven
 
 $fixture = (Get-Content output/memory/replay-2m-seven/fixtures.json -Raw | ConvertFrom-Json)[0].manifestPath
-node scripts/benchmark.mjs --suite campaign-v1 --ticks 2000000 --jobs 5 --workers 5 --dataset $fixture --repetitions 7 --sample-ms 0 --output output/memory/campaign-2m-five-seven
+node scripts/benchmark-memory.mjs --suite campaign-v1 --ticks 2000000 --jobs 5 --workers 5 --dataset $fixture --repetitions 7 --sample-ms 0 --output output/memory/campaign-2m-five-seven
 ```
 
 The overhead study used `overhead-v1`, `--ticks 250000`, `--repetitions 7` and
