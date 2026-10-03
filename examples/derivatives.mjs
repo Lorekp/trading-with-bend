@@ -47,7 +47,7 @@ let final = null;
 if (process.argv.includes('--final')) {
   const selected = completed[0], plan = walkForwardSplits(samples, split);
   const protocol = { selectedTrial: selected.id, score: 'sum-validation-net-pnl', configHash: hash(config), datasetHash: hash(dataset) };
-  final = await withFinalHoldout(resolve(root, 'holdout'), { holdoutId: 'derivatives-demo-v1', strategyHash: hash({ targetLots: selected.result.targetLots, protocol }), protocol, samples, plan }, rows =>
+  final = await withFinalHoldout(resolve(root, 'holdout'), { holdoutId: 'derivatives-demo-v1', strategyHash: hash({ targetLots: selected.result.targetLots, protocol }), protocol, samples, plan }, ({ rows }) =>
     runExperiment(root, { protocol, targetLots: selected.result.targetLots, evaluationPartition: 'final' }, (_, context) => {
       const report = evaluateWindow({ config, data: dataset.data, rows, targetLots: selected.result.targetLots });
       context.writeArtifact('report.json', report);
