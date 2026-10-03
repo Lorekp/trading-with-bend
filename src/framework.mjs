@@ -268,7 +268,7 @@ export class Backtest {
         const loss = this.#peak - equity;
         if (loss * this.#drawdown.denominator > this.#drawdown.numerator * this.#peak) this.#drawdown = {numerator:loss,denominator:this.#peak};
       }
-      return { duplicate: false, status, fills: structuredClone(newFills) };
+      return { duplicate: false, status, fills: newFills.length ? structuredClone(newFills) : [] };
     } catch (error) {
       if (error instanceof BacktestError) throw error;
       throw new BacktestError('BEND_RUNTIME', String(error));

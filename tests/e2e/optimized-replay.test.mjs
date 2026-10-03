@@ -492,7 +492,11 @@ test('a durability failure after writing manifest bytes cannot publish an audit 
     let injected = 0;
     fs.writeFileSync = (path, ...args) => {
       const result = original(path, ...args);
-      if (dirname(String(path)) === directory && String(path).includes('.json')) {
+      // Publication writes a synchronized temporary descriptor. Identify the
+      // audit manifest by its bytes so a failed write cannot commit it.
+      let manifest;
+      try { manifest = JSON.parse(String(args[0])); } catch {}
+      if (manifest?.format === 'bend-replay-audit-v2') {
         injected++;
         throw Object.assign(new Error('Durability failure after manifest bytes were written'), { code: 'EIO' });
       }
@@ -562,6 +566,16 @@ test('admitted quotes supply independent reusable cursors and reserve future mar
   const a = informationSource.observations(), b = informationSource.observations();
   assert.equal(a.next().value.data.id, quotes[0].id); assert.equal(a.next().value.data.id, quotes[1].id);
   assert.equal(b.next().value.data.id, quotes[0].id); a.return(); b.return();
+  const lead = dataset.rows(), lag = dataset.rows();
+  assert.deepEqual(lag.next().value, quotes[0]);
+  for (const quote of quotes) assert.deepEqual(lead.next().value, quote);
+  assert.equal(lead.next().done, true);
+  for (const quote of quotes.slice(1)) {
+    const row = lag.next().value;
+    assert.deepEqual(row, quote);
+    assert.throws(() => { row.bid = '99999'; }, TypeError);
+  }
+  assert.equal(lag.next().done, true, 'A lagging cursor completes after another cursor crosses every chunk');
   const venue = new QuoteExecutionVenue({ id: 'clock-venue', config, ticks: dataset, maxPositionLots: '2', auditDirectory: join(root, 'clock-replay') });
   auditCleanup(t, () => venue.abort());
   const source = new InformationSource({ id: 'clock-source', instrument: config.instrument,
@@ -788,6 +802,23 @@ test('speed benchmark runs isolated A/A pairs with complete evidence and records
   writeFileSync(dependency, Buffer.concat([bytes, Buffer.from(' ')]));
   assert.throws(() => verifyExperiment(listExperiments(measured.find(row => row.caseId === protocol.cases[0]).registry)[0]), { code: 'DEPENDENCY_CHANGED' });
   writeFileSync(dependency, bytes);
+
+  // Profiling reuses exact saved work in a separate registry, never timing samples.
+  const selected = measured[0], profilingRegistry = join(root, 'profiling-registry');
+  const timingBytes = readFileSync(join(output, 'samples.json'));
+  const profiling = execute(['experiments/hillclimb/profile.mjs',
+    join(output, 'attempts/measurement', selected.caseId, String(selected.pair), selected.target, 'execution/request.json'), profilingRegistry]);
+  assert.ifError(profiling.error); assert.equal(profiling.status, 0, `${profiling.stderr}\n${profiling.stdout}`);
+  const profiled = JSON.parse(profiling.stdout).result;
+  assert.equal(profiled.eligibleForTimingInference, false);
+  assert.equal(profiled.traceHash, selected.metrics.traceHash);
+  assert.equal(profiled.targetsHash, selected.metrics.targetsHash);
+  assert.deepEqual(profiled.counts, selected.metrics.counts);
+  assert.equal(profiled.runtime.nodeOptions, '--max-old-space-size=256');
+  const profilingJob = listExperiments(profilingRegistry)[0];
+  const cpuProfile = JSON.parse(readFileSync(join(profilingJob.attempts[0].outputDirectory, 'profile.cpuprofile'), 'utf8'));
+  assert.ok(cpuProfile.nodes.length > 0 && cpuProfile.samples.length > 0);
+  assert.deepEqual(readFileSync(join(output, 'samples.json')), timingBytes);
 
   const requestPath = join(root, 'failure-request.json'), registry = join(root, 'failure-registry');
   const data = protocol.datasets[protocol.cases[0]];
