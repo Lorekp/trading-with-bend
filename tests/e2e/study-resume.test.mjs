@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { deserialize, serialize } from 'node:v8';
 import { evaluateStudy } from '../../src/study.mjs';
 import { walkForwardSplits } from '../../src/evaluation.mjs';
 import { quoteInformationSource } from '../../src/information-source.mjs';
@@ -10,7 +11,7 @@ import { QuoteExecutionVenue } from '../../src/execution-venue.mjs';
 import { targetPosition } from '../../src/strategies.mjs';
 import { hash } from '../../src/core.mjs';
 
-function fixture(t, { disk = false } = {}) {
+function fixture(t, { disk = false, baselineConfig = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'bend-study-resume-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const instrument = { symbol: 'RESUME', currency: 'EUR', lotSize: '1', priceTick: '1' };
@@ -28,10 +29,10 @@ function fixture(t, { disk = false } = {}) {
     assert.ok(evaluation.rows.every(row => row.partition === 'validation'));
     return { strategy: targetPosition('1'), baselines: { cash: targetPosition('0') }, metadata: { seed: 23n }, createReplay: ({ variant }) => ({
       informationSource: quoteInformationSource({ id: 'resume-information', instrument, ticks }),
-      executionVenue: new QuoteExecutionVenue({ id: 'resume-venue', config, ticks, maxPositionLots: '1', ...(disk ? { auditDirectory: join(root, 'audits', `${fold.id}-${variant}`) } : {}) }),
+      executionVenue: new QuoteExecutionVenue({ id: 'resume-venue', config: variant === 'cash' ? { ...config, ...baselineConfig } : config, ticks, maxPositionLots: '1', ...(disk ? { auditDirectory: join(root, 'audits', `${fold.id}-${variant}`) } : {}) }),
     }) };
   };
-  const preparationHash = hash({ callbackContent: prepare.toString(), strategyContent: targetPosition.toString(), config, ticksHash: hash(ticks), seed: '23' });
+  const preparationHash = hash({ callbackContent: prepare.toString(), strategyContent: targetPosition.toString(), config, baselineConfig, ticksHash: hash(ticks), seed: '23' });
   const directory = join(root, 'attempt-one-cache');
   return { root, samples, plan, protocol, config, calls, prepare, preparationHash, directory, options: { samples, plan, protocol } };
 }
@@ -101,4 +102,56 @@ test('resuming disk folds verifies completed audit files before skipping prepara
   rmSync(audit.manifestPath);
   await assert.rejects(evaluateStudy({ ...f.options, resume }, f.prepare), { code: 'STUDY_CACHE_AUDIT' });
   assert.deepEqual(f.calls, ['fold-1', 'fold-2']);
+});
+
+test('completed fold admission rejects rechecksummed semantic corruption before reusing a fold', async t => {
+  const f = fixture(t);
+  await failAfterFirstFold(f);
+  const foldPath = join(f.directory, `${hash('fold-1')}.json`), committed = JSON.parse(readFileSync(foldPath, 'utf8'));
+  const current = join(f.root, 'corruption-promotion-cache');
+  const resume = { directory: current, preparationHash: f.preparationHash, previousDirectories: [f.directory] };
+  const mutations = [
+    ['null payload', () => null],
+    ['false payload', () => false],
+    ['metrics', value => { value.fold.candidate.metrics.totalReturn = { numerator: '999', denominator: '1' }; }],
+    ['routing', value => { value.fold.baselines.cash.report.routing.executionVenue.datasetHash = hash('different-execution-data'); }],
+    ['baseline population', value => { value.baselineNames = []; }],
+    ['fold identity', value => { value.fold.evaluationHash = hash('different-validation-rows'); }],
+    ['missing report', value => { delete value.fold.baselines.cash.report; }],
+    ['invalid structure', value => { value.fold.baselines = []; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    let value = deserialize(Buffer.from(committed.value, 'base64'));
+    const replacement = mutate(value);
+    if (replacement !== undefined) value = replacement;
+    const { checksum, ...body } = { ...committed, value: serialize(value).toString('base64') };
+    writeFileSync(foldPath, JSON.stringify({ ...body, checksum: hash(body) }));
+    await assert.rejects(evaluateStudy({ ...f.options, resume }, () => { throw new Error('corrupt folds must fail admission'); }),
+      { code: 'STUDY_CACHE_CORRUPT' }, name);
+    assert.deepEqual(readdirSync(current), ['manifest.json'], `${name} must not be promoted`);
+  }
+  assert.deepEqual(f.calls, ['fold-1']);
+});
+
+test('fresh fold admission compares each actual execution configuration before returning or caching results', async t => {
+  const f = fixture(t, { baselineConfig: { feePerLot: '1' } });
+  await assert.rejects(evaluateStudy(f.options, f.prepare), { code: 'STUDY_BASELINE' });
+  await assert.rejects(evaluateStudy({ ...f.options, resume: { directory: f.directory, preparationHash: f.preparationHash } }, f.prepare),
+    { code: 'STUDY_BASELINE' });
+  assert.deepEqual(readdirSync(f.directory), ['manifest.json']);
+});
+
+test('a changed fresh baseline population rejects before creating any replay', async t => {
+  const f = fixture(t);
+  await failAfterFirstFold(f);
+  const prepare = context => {
+    const prepared = f.prepare(context);
+    if (context.fold.id === 'fold-2') return { ...prepared, baselines: { renamed: targetPosition('0') },
+      createReplay() { throw new Error('population mismatch must reject before replay'); } };
+    return prepared;
+  };
+  await assert.rejects(evaluateStudy(f.options, prepare), { code: 'STUDY_BASELINE' });
+  await assert.rejects(evaluateStudy({ ...f.options, resume: { directory: f.directory, preparationHash: f.preparationHash } }, prepare),
+    { code: 'STUDY_BASELINE' });
+  assert.equal(readdirSync(f.directory).filter(name => name.endsWith('.json')).length, 2);
 });

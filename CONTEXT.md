@@ -24,5 +24,14 @@ separate from preceding information used to initialize observations or marks.
 **Study protocol**: The frozen rules for evaluation windows, account resets,
 warmup, metric sampling, baselines and selection using validation data.
 
+**Frozen experiment**: A trial whose configuration, worker, declared helpers
+and input snapshots are admitted together as immutable execution evidence.
+Later edits to the original sources do not change the admitted trial.
+
+**Completed validation fold**: Candidate and baseline replay results for one
+evaluation window whose identities, baseline population, replay audits and
+metrics agree with the study protocol. Reusing a result requires the same
+admission rules as a fresh evaluation.
+
 **Final release**: The single authorized evaluation of the final partition after
 the strategy and study protocol have been fixed.

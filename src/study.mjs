@@ -1,7 +1,7 @@
 import { freeze, hash, integer, nat, requireThat } from './core.mjs';
 import { admitSplitPlan, summarizeRegularReturns } from './evaluation.mjs';
 import { runStrategy } from './replay.mjs';
-import { readReplayAudit } from './recording.mjs';
+import { openReplayAudit, readReplayAudit } from './recording.mjs';
 import { verifiedRuntimeProvenance } from './provenance.mjs';
 import { openStudyCache } from './study-cache.mjs';
 
@@ -74,6 +74,48 @@ function aggregateBaselines(folds, names, candidate) {
   }));
 }
 
+function admitBaselinePopulation(names, previous, cached) {
+  requireThat(previous === null || hash(names) === hash(previous), 'STUDY_BASELINE',
+    cached ? 'Every cached fold must use the same baseline population' : 'Every fold must use the same baseline population');
+}
+
+// Fresh replay evidence and decoded cache payloads share this semantic seam.
+// Actual venue routes are required for fresh folds: reports alone do not carry
+// all execution configuration. Only the completed envelope is persisted.
+function admitCompletedFold(value, { expected, protocol, baselineNames, cached, routes }) {
+  const fold = value?.fold;
+  requireThat(fold && fold.id === expected.id && fold.foldHash === expected.foldHash && fold.trainingHash === expected.trainingHash && fold.evaluationHash === expected.evaluationHash
+    && fold.startTime === expected.startTime && fold.endTime === expected.endTime && fold.candidate?.report && fold.baselines && typeof fold.baselines === 'object' && !Array.isArray(fold.baselines)
+    && value.route && typeof value.route === 'object' && value.route.executionConfig && typeof value.route.executionConfig === 'object' && Array.isArray(value.baselineNames),
+  'STUDY_CACHE_CORRUPT', 'Completed fold payload has invalid identity or structure');
+  const names = value.baselineNames;
+  requireThat(names.length > 0 && names.every(name => typeof name === 'string') && !names.includes('candidate') && hash(names) === hash([...names].sort())
+    && hash(names) === hash(Object.keys(fold.baselines).sort()),
+  cached ? 'STUDY_CACHE_CORRUPT' : 'STUDY_BASELINE', cached ? 'Cached fold baseline population is invalid' : 'At least one named baseline strategy is required');
+  admitBaselinePopulation(names, baselineNames, cached);
+  for (const variant of ['candidate', ...names]) {
+    const result = variant === 'candidate' ? fold.candidate : fold.baselines[variant];
+    requireThat(result?.report && result.report.routing?.informationSource && result.report.routing?.executionVenue,
+      'STUDY_CACHE_CORRUPT', 'Every completed fold variant must have a report and routing identity');
+    if (result.report.audit) {
+      try {
+        const audit = openReplayAudit(result.report);
+        try { for (const stream of Object.keys(audit.manifest.streams)) for (const row of audit.records(stream)) void row; }
+        finally { audit.close(); }
+      } catch (error) {
+        throw Object.assign(new Error('Completed fold audit is missing or changed', { cause: error }), { code: 'STUDY_CACHE_AUDIT' });
+      }
+    }
+    const route = cached ? routingIdentity(result.report, { config: value.route.executionConfig }) : routes[variant];
+    requireThat(hash(route) === hash(value.route), cached ? 'STUDY_CACHE_CORRUPT' : 'STUDY_BASELINE',
+      cached ? 'Cached candidate and baselines must share their recorded execution identity' : 'Candidate and baselines must share information and execution datasets, instruments and models');
+    const metrics = summarizeRegularReturns({ ...result.report, valuations: sampledEquity(result.report, { startTime: expected.startTime, endTime: expected.endTime, ...protocol }) }, protocol);
+    if (cached) requireThat(hash(metrics) === hash(result.metrics), 'STUDY_CACHE_CORRUPT', 'Cached metrics do not match their verified report and protocol');
+    else result.metrics = metrics;
+  }
+  return freeze(value);
+}
+
 /** All validation folds, fresh accounts, comparable baselines and explicit metrics.
  * Optional resume: { directory, preparationHash, previousDirectories? }.
  * preparationHash is
@@ -105,52 +147,39 @@ export async function evaluateStudy({ samples, plan, protocol, resume }, prepare
     const startTime = available(evaluation.rows[0]), endTime = available(evaluation.rows.at(-1));
     const foldIdentity = { id: fold.id, foldHash: fold.hash, trainingHash: training.hash, evaluationHash: evaluation.hash, startTime, endTime };
     const cached = cache?.load(foldIdentity);
-    if (cached) {
-      const names = cached.baselineNames;
-      requireThat(names.length > 0 && !names.includes('candidate') && hash(names) === hash([...names].sort()) && hash(names) === hash(Object.keys(cached.fold.baselines).sort()),
-        'STUDY_CACHE_CORRUPT', 'Cached fold baseline population is invalid');
-      baselineNames ??= names;
-      requireThat(hash(names) === hash(baselineNames), 'STUDY_BASELINE', 'Every cached fold must use the same baseline population');
-      for (const result of [cached.fold.candidate, ...names.map(name => cached.fold.baselines[name])]) {
-        requireThat(hash(routingIdentity(result.report, { config: cached.route.executionConfig })) === hash(cached.route), 'STUDY_CACHE_CORRUPT', 'Cached candidate and baselines must share their recorded execution identity');
-        const metrics = summarizeRegularReturns({ ...result.report, valuations: sampledEquity(result.report, { startTime, endTime, ...protocol }) }, protocol);
-        requireThat(hash(metrics) === hash(result.metrics), 'STUDY_CACHE_CORRUPT', 'Cached metrics do not match their verified report and protocol');
+    let completed = cached?.value, routes;
+    if (!cached) {
+      const prepared = await prepareFold({ fold, training, evaluation, protocol });
+      requireThat(prepared && typeof prepared.createReplay === 'function' && typeof prepared.strategy === 'function', 'STUDY_INPUT', 'Prepare a strategy and fresh replay factory');
+      const baselines = prepared.baselines ?? {};
+      const names = Object.keys(baselines).sort();
+      requireThat(names.length > 0 && !names.includes('candidate') && names.every(name => typeof baselines[name] === 'function'), 'STUDY_BASELINE', 'At least one named baseline strategy is required');
+      // Reject a changed population before effectful replay preparation begins.
+      admitBaselinePopulation(names, baselineNames, false);
+      const start = nat(startTime, 'evaluation start'), end = nat(endTime, 'evaluation end');
+      const results = {}; routes = {};
+      let identity = null;
+      for (const [variant, strategy] of [['candidate', prepared.strategy], ...names.map(name => [name, baselines[name]])]) {
+        const { informationSource, executionVenue } = await prepared.createReplay({ variant });
+        // Warmup only supplies history. Strategy state and exposure start at validation.
+        const source = { instrument: informationSource.instrument, manifest: informationSource.manifest,
+          *observations() { for (const row of informationSource.observations()) { if (BigInt(row.availableAt) > end) break; yield row; } } };
+        const gated = context => BigInt(context.time) < start ? null : strategy(context);
+        if (strategy.lookback !== undefined) gated.lookback = strategy.lookback;
+        const run = runStrategy(source, executionVenue, gated);
+        requireThat(run.endTime === endTime, 'STUDY_WINDOW', 'Information source must reach the exact evaluation endpoint');
+        const report = run.report();
+        const route = routingIdentity(report, executionVenue);
+        identity ??= route;
+        routes[variant] = route;
+        results[variant] = { report };
       }
-      cache.save(foldIdentity, cached);
-      identities.push(cached.route); folds.push(cached.fold);
-      continue;
+      completed = { fold: { ...foldIdentity, candidate: results.candidate, baselines: Object.fromEntries(names.map(name => [name, results[name]])), metadata: prepared.metadata ?? null }, route: identity, baselineNames: names };
     }
-    const prepared = await prepareFold({ fold, training, evaluation, protocol });
-    requireThat(prepared && typeof prepared.createReplay === 'function' && typeof prepared.strategy === 'function', 'STUDY_INPUT', 'Prepare a strategy and fresh replay factory');
-    const baselines = prepared.baselines ?? {};
-    const names = Object.keys(baselines).sort();
-    requireThat(names.length > 0 && !names.includes('candidate') && names.every(name => typeof baselines[name] === 'function'), 'STUDY_BASELINE', 'At least one named baseline strategy is required');
-    baselineNames ??= names;
-    requireThat(hash(names) === hash(baselineNames), 'STUDY_BASELINE', 'Every fold must use the same baseline population');
-    const start = nat(startTime, 'evaluation start'), end = nat(endTime, 'evaluation end');
-    const results = {};
-    let identity = null;
-    for (const [variant, strategy] of [['candidate', prepared.strategy], ...names.map(name => [name, baselines[name]])]) {
-      const { informationSource, executionVenue } = await prepared.createReplay({ variant });
-      // Warmup only supplies history. Strategy state and exposure start at validation.
-      const source = { instrument: informationSource.instrument, manifest: informationSource.manifest,
-        *observations() { for (const row of informationSource.observations()) { if (BigInt(row.availableAt) > end) break; yield row; } } };
-      const gated = context => BigInt(context.time) < start ? null : strategy(context);
-      if (strategy.lookback !== undefined) gated.lookback = strategy.lookback;
-      const run = runStrategy(source, executionVenue, gated);
-      requireThat(run.endTime === endTime, 'STUDY_WINDOW', 'Information source must reach the exact evaluation endpoint');
-      const report = run.report();
-      const valuations = sampledEquity(report, { startTime, endTime, ...protocol });
-      const metrics = summarizeRegularReturns({ ...report, valuations }, protocol);
-      const route = routingIdentity(report, executionVenue);
-      identity ??= route;
-      requireThat(hash(route) === hash(identity), 'STUDY_BASELINE', 'Candidate and baselines must share information and execution datasets, instruments and models');
-      results[variant] = { report, metrics };
-    }
-    identities.push(identity);
-    const completed = { ...foldIdentity, candidate: results.candidate, baselines: Object.fromEntries(names.map(name => [name, results[name]])), metadata: prepared.metadata ?? null };
-    cache?.save(foldIdentity, { fold: completed, route: identity, baselineNames: names });
-    folds.push(completed);
+    completed = admitCompletedFold(completed, { expected: foldIdentity, protocol, baselineNames, cached: Boolean(cached), routes });
+    baselineNames ??= completed.baselineNames;
+    cache?.save(foldIdentity, completed);
+    identities.push(completed.route); folds.push(completed.fold);
   }
   const candidate = aggregate(folds.map(fold => fold.candidate));
   const baselines = aggregateBaselines(folds, baselineNames, candidate);

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { fork } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -10,6 +10,7 @@ import { canonical, hash } from '../../src/core.mjs';
 import { sourceManifest } from '../../src/provenance.mjs';
 import { createWorkerBundle, verifyWorkerBundle, workerBundleExecution } from '../../src/worker-bundle.mjs';
 import { Backtest } from '../../src/framework.mjs';
+import { enqueueExperiment, listExperiments, readExperimentResult, runQueue, verifyExperiment } from '../../src/experiments.mjs';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const fileHash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -108,6 +109,25 @@ test('bundle identity deduplicates datasets, retains exact file membership and r
   assert.throws(() => verifyWorkerBundle(first.bundle), { code: 'BUNDLE_CORRUPT' });
   writeFileSync(changed.bundle.inputFiles['/data/file'].path, 'mutated snapshot');
   assert.throws(() => verifyWorkerBundle(changed.bundle), { code: 'BUNDLE_CORRUPT' });
+});
+
+test('frozen experiment admission owns configuration remapping and rejects detached bundle inputs', async t => {
+  const f = fixture(t), configuration = { data: { file: f.data }, hidden: f.hidden, note: f.data };
+  const request = { key: 'admitted', sourceRoot: f.sourceRoot, workerModule: f.worker, dependencies: [f.helper], configuration,
+    inputFiles: { '/data/file': f.data }, frozen: true };
+  const manifest = enqueueExperiment(f.registry, request);
+  assert.equal(manifest.configuration.data.file, manifest.bundle.inputFiles['/data/file'].path);
+  assert.equal(configuration.data.file, f.data);
+  assert.equal(enqueueExperiment(f.registry, request).specificationHash, manifest.specificationHash);
+  assert.throws(() => enqueueExperiment(f.registry, { ...request, key: 'detached', bundle: manifest.bundle }), { code: 'WORKER_ISOLATION' });
+  assert.equal(listExperiments(f.registry).length, 1);
+  assert.throws(() => verifyExperiment({ ...manifest, configuration: { ...manifest.configuration, data: { file: f.hidden } } }), { code: 'BUNDLE_INPUT' });
+  assert.throws(() => verifyExperiment({ ...manifest, workerModule: pathToFileURL(f.worker).href }), { code: 'BUNDLE_CORRUPT' });
+  assert.throws(() => verifyExperiment({ ...manifest, dependencies: {} }), { code: 'BUNDLE_CORRUPT' });
+  writeFileSync(f.worker, 'throw new Error("changed source");\n');
+  writeFileSync(f.data, 'changed original input');
+  await runQueue(f.registry, { timeoutMs: 30000 });
+  assert.deepEqual(readExperimentResult(f.registry, request.key), { value: 7, data: 'training', denied: 'ERR_ACCESS_DENIED', writeDenied: 'ERR_ACCESS_DENIED', note: f.data });
 });
 
 test('freezing rejects mismatched declared inputs and imports outside the checkout', t => {

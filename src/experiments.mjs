@@ -112,29 +112,40 @@ function moduleUrl(module) {
 
 /** Idempotently enqueue a key. Changed configuration, seed, entrypoint path,
  * or entrypoint bytes under the same key are rejected, including across agents. */
-export function enqueueExperiment(root, { key, configuration, workerModule, dependencies = [], seed = deterministicSeed(key), resources = {}, frozen = false, inputFiles = {}, constrained = true, sourceRoot, bundle } = {}) {
+export function enqueueExperiment(root, options) {
+  return prepareExperiment(root, options)();
+}
+
+// Internal admission seam: Campaign can reserve after preparation without owning
+// the frozen configuration/bundle pairing. The returned function rechecks the
+// captured execution evidence before publishing the immutable registration.
+export function prepareExperiment(root, { key, configuration, workerModule, dependencies = [], seed = deterministicSeed(key), resources = {}, frozen = false, inputFiles = {}, constrained = true, sourceRoot, bundle } = {}) {
   assert(typeof frozen === 'boolean' && typeof constrained === 'boolean', 'WORKER_ISOLATION', 'frozen and constrained must be booleans');
+  assert(bundle === undefined, 'WORKER_ISOLATION', 'Worker bundles are created during experiment admission');
   assert(typeof key === 'string' && key.length > 0 && key.length <= 1024 && !key.includes('\0'), 'INVALID_KEY', 'key must contain 1..1024 characters without null bytes');
   assert(Number.isInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'INVALID_SEED', 'seed must be an unsigned 32-bit integer');
-  canonicalExperimentJson(configuration);
+  configuration = JSON.parse(canonicalExperimentJson(configuration));
   assert(Array.isArray(dependencies), 'DEPENDENCIES', 'dependencies must be an array of local file paths or file URLs');
   assert(resources && typeof resources === 'object' && !Array.isArray(resources) && Object.keys(resources).every(key => ['cpuThreads', 'memoryMiB'].includes(key)), 'INVALID_RESOURCES', 'resources only accepts cpuThreads and memoryMiB');
   const { cpuThreads = 1, memoryMiB = 0 } = resources;
   assert(Number.isInteger(cpuThreads) && cpuThreads > 0 && Number.isInteger(memoryMiB) && memoryMiB >= 0, 'INVALID_RESOURCES', 'resources require positive cpuThreads and nonnegative memoryMiB integers');
   if (frozen) {
-    if (bundle) verifyWorkerBundle(bundle);
-    else {
-      const snapshot = createWorkerBundle(root, { workerModule, dependencies, configuration, inputFiles, ...(sourceRoot === undefined ? {} : { sourceRoot }) });
-      bundle = snapshot.bundle;
-      configuration = snapshot.configuration;
-    }
+    const snapshot = createWorkerBundle(root, { workerModule, dependencies, configuration, inputFiles, ...(sourceRoot === undefined ? {} : { sourceRoot }) });
+    bundle = snapshot.bundle;
+    configuration = snapshot.configuration;
     workerModule = bundle.workerModule;
   } else {
     assert(inputFiles && Object.keys(inputFiles).length === 0 && sourceRoot === undefined && bundle === undefined, 'WORKER_ISOLATION', 'inputFiles, sourceRoot and bundles require frozen execution');
   }
   const worker = moduleUrl(workerModule);
   const dependencyHashes = bundle?.dependencies ?? Object.fromEntries([...new Set(dependencies.map(moduleUrl))].sort(compare).map(url => [url, digestFile(fileURLToPath(url))]));
-  return registerExperiment(root, { key, configuration, seed, resources: { cpuThreads, memoryMiB }, execution: 'worker', workerModule: worker, workerHash: digestFile(fileURLToPath(worker)), dependencies: dependencyHashes, ...(bundle ? { bundle, constrained } : {}) });
+  const admitted = { key, configuration, seed, resources: { cpuThreads, memoryMiB }, execution: 'worker', workerModule: worker,
+    workerHash: digestFile(fileURLToPath(worker)), dependencies: dependencyHashes, toolkit: bundle?.provenance ?? toolkitProvenance(), ...(bundle ? { bundle, constrained } : {}) };
+  root = resolve(root);
+  return () => {
+    verifyExperiment(admitted);
+    return registerExperiment(root, admitted);
+  };
 }
 
 function registerExperiment(root, { key, configuration, seed, ...execution }) {
@@ -319,7 +330,9 @@ export function finishExperimentAttempt(path, token, result, error) {
 
 export function verifyExperiment(manifest) {
   if (manifest.bundle) {
-    verifyWorkerBundle(manifest.bundle);
+    verifyWorkerBundle(manifest.bundle, { configuration: manifest.configuration });
+    assert(manifest.workerModule === manifest.bundle.workerModule && canonicalExperimentJson(manifest.dependencies) === canonicalExperimentJson(manifest.bundle.dependencies),
+      'BUNDLE_CORRUPT', 'Frozen execution does not match its registered worker and dependencies');
     assert(canonicalExperimentJson(manifest.bundle.provenance) === canonicalExperimentJson(manifest.toolkit), 'TOOLKIT_CHANGED', 'Frozen worker toolkit does not match its registered identity');
   }
   if (manifest.execution === 'worker') {

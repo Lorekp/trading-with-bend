@@ -2,11 +2,10 @@ import { readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { freeze, hash, nat, requireThat } from './core.mjs';
-import { canonicalExperimentJson, deterministicSeed, enqueueExperiment, listExperiments, readExperimentResult, runQueue } from './experiments.mjs';
+import { canonicalExperimentJson, deterministicSeed, prepareExperiment, listExperiments, readExperimentResult, runQueue } from './experiments.mjs';
 import { selectStudy } from './study.mjs';
 import { verifiedRuntimeProvenance } from './provenance.mjs';
 import { publishImmutable } from './immutable-files.mjs';
-import { createWorkerBundle } from './worker-bundle.mjs';
 
 const terminal = new Set(['completed', 'failed', 'abandoned', 'cancelled']);
 const read = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -107,13 +106,8 @@ export function createCampaign(directory, input) {
     requireThat(Object.keys(resources).every(key => ['cpuThreads', 'memoryMiB'].includes(key)) && Number.isSafeInteger(resources.cpuThreads) && resources.cpuThreads > 0 && resources.cpuThreads <= spec.resourceBudget.cpuThreads && Number.isSafeInteger(resources.memoryMiB) && resources.memoryMiB >= 0 && (spec.resourceBudget.memoryMiB === undefined || resources.memoryMiB > 0 && resources.memoryMiB <= spec.resourceBudget.memoryMiB), 'CAMPAIGN_RESOURCES', 'Trial resource declaration must fit the frozen campaign budget; bounded memory requires a positive declaration');
     requireThat(job.inputFiles === undefined || job.inputFiles && Object.getPrototypeOf(job.inputFiles) === Object.prototype, 'CAMPAIGN_INPUT', 'inputFiles must map configuration JSON pointers to local source files');
     const inputFiles = Object.fromEntries(Object.entries(job.inputFiles ?? {}).map(([pointer, path]) => {
-      requireThat(pointer.startsWith('/') && !/~(?![01])/.test(pointer), 'CAMPAIGN_INPUT', 'Input files require valid JSON pointers');
-      const keys = pointer.slice(1).split('/').map(key => key.replaceAll('~1', '/').replaceAll('~0', '~'));
-      let field = configuration;
-      for (const key of keys) { requireThat(field && typeof field === 'object' && Object.hasOwn(field, key), 'CAMPAIGN_INPUT', `Missing input field ${pointer}`); field = field[key]; }
-      const url = localUrl(path);
-      requireThat(typeof field === 'string' && localUrl(field) === url, 'CAMPAIGN_INPUT', `Declared input must match configuration at ${pointer}`);
-      return [pointer, url];
+      requireThat(pointer !== '/campaign' && !pointer.startsWith('/campaign/'), 'CAMPAIGN_INPUT', 'Input files cannot replace reserved campaign metadata');
+      return [pointer, localUrl(path)];
     }));
     const submitted = { key: job.key, configuration, workerModule: localUrl(job.workerModule), dependencies: [...new Set((job.dependencies ?? []).map(localUrl))].sort(), seed, resources, frozen: true, constrained: spec.workerIsolation === 'filesystem', inputFiles, ...(job.sourceRoot === undefined ? {} : { sourceRoot: fileURLToPath(localUrl(job.sourceRoot)) }) };
     requireThat([submitted.workerModule, ...submitted.dependencies, ...Object.values(inputFiles)].every(url => !within(spec.finalAuthorityDirectory, fileURLToPath(url))) && (submitted.sourceRoot === undefined || !within(spec.finalAuthorityDirectory, submitted.sourceRoot)), 'CAMPAIGN_AUTHORITY', 'Exploration workers and inputs cannot be taken from the final authority directory');
@@ -133,7 +127,7 @@ export function createCampaign(directory, input) {
     verifiedRuntimeProvenance();
     // Freeze before reservation: malformed inputs consume no search budget and
     // registration uses exactly these verified bytes despite concurrent edits.
-    const snapshot = createWorkerBundle(registryRoot, request);
+    const register = prepareExperiment(registryRoot, request);
     advance(current => {
       const existing = current.members.get(job.key);
       if (existing) { requireThat(same(existing.request, request), 'CAMPAIGN_TRIAL_COLLISION', 'Trial key already has a different submission'); return null; }
@@ -143,7 +137,7 @@ export function createCampaign(directory, input) {
     });
     // A crash here leaves a durable, visible reservation. The identical submit
     // resumes registration even after sealing; no failed admission is omitted.
-    const manifest = enqueueExperiment(registryRoot, { ...request, configuration: snapshot.configuration, bundle: snapshot.bundle });
+    const manifest = register();
     bind(manifest);
     return freeze(copy(manifest));
   }

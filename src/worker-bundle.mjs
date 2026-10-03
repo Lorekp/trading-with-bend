@@ -169,7 +169,7 @@ export function createWorkerBundle(registryRoot, { workerModule, dependencies = 
 }
 
 /** Verify every byte and reject undeclared files before and after execution. */
-export function verifyWorkerBundle(bundle) {
+export function verifyWorkerBundle(bundle, options = {}) {
   requireThat(bundle?.version === 1 && /^[0-9a-f]{64}$/.test(bundle.id), 'BUNDLE_CORRUPT', 'Invalid bundle descriptor');
   regularPath(bundle.path, true);
   const manifest = readJson(regularPath(join(bundle.path, 'bundle.json')));
@@ -182,6 +182,10 @@ export function verifyWorkerBundle(bundle) {
   requireThat(canonical(names.sort()) === canonical(Object.keys(manifest.files).sort()), 'BUNDLE_CORRUPT', 'Bundle contains missing or undeclared files');
   for (const [name, expected] of Object.entries(manifest.files)) requireThat(digestFile(join(bundle.path, safeRelative(name))) === expected, 'BUNDLE_CORRUPT', `Frozen file changed: ${name}`);
   for (const input of Object.values(manifest.inputs)) requireThat(digestFile(input.path) === input.hash, 'BUNDLE_CORRUPT', 'Frozen input changed');
+  if (Object.hasOwn(options, 'configuration')) for (const [pointer, input] of Object.entries(manifest.inputs)) {
+    const field = inputField(options.configuration, pointer);
+    requireThat(filePath(field.parent[field.key]) === input.path, 'BUNDLE_INPUT', `Frozen configuration does not match its input snapshot: ${pointer}`);
+  }
   return manifest;
 }
 
