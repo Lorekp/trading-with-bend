@@ -8,6 +8,8 @@
 
 Use `comparisonTable` for report-level population summaries; it preserves invalid results with null performance. The numerical selector does not account for drawdown appetite, statistical uncertainty, multiplicity or economic capacity. When the user's criterion differs from exact validation return, report that criterion explicitly without pretending it is an option to `selectStudy`.
 
+For an official campaign, keep the immutable raw-return winner and economic acceptance as separate report fields. Test that winner against the plan's frozen capital/exposure, horizon, benchmark improvement, costs, loss/drawdown limits and capacity assumptions. A negative-return numerical winner, or one failing those limits, yields "no acceptable strategy". Filtering results or promoting a different candidate after seeing outcomes cannot redefine official selection or its final release. Report missing acceptance evidence as unresolved rather than inferred success.
+
 ## Sampling comes before Sharpe
 
 Raw event-sampled reports deliberately do not infer annualized Sharpe. `sampleEquity(report, { startTime, endTime, intervalMs, maxStalenessMs })` uses the last available valuation at/before each grid point, with no future mark or interpolation. The endpoints must lie on the declared grid; missing/stale marks, unmarked/nonpositive equity and deficit accounts cause rejection.
@@ -20,7 +22,11 @@ Raw event-sampled reports deliberately do not infer annualized Sharpe. `sampleEq
 
 Discuss all folds and regimes covered, edge relative to controls, exposure/turnover/fill counts, drawdown and the sensitivity to plausible costs/delays/liquidity. A short positive month, an isolated optimum or a few favorable trades does not establish robustness. Report uncertainty as unresolved when no suitable statistical analysis was performed; a deterministic seed is reproducibility, not confidence.
 
-The shared trading-study API has no built-in probabilistic/selection-adjusted Sharpe or strategy-return confidence interval. Existing bootstrap code in the speed benchmark measures implementation performance, not trading returns. If uncertainty analysis is requested, use a separately justified method respecting serial dependence and candidate selection; retain the assumptions and whole trial population. Do not label ordinary Sharpe as a probability of future profit.
+For profitability-seeking swarms, report the predeclared dependence-aware uncertainty/selection analysis, not just a winner's ordinary Sharpe. Count all candidates, losing/failed/abandoned work, ablations/stress populations and known prior studies/manual changes across agents. Distinguish admitted trial count from unknown or effective independent search breadth. Identify unavailable previous outcomes and exposed periods; missing search history weakens confirmation claims.
+
+Retain regular paired strategy/control return panels with timestamps, fold boundaries, sampling/missingness rules and candidate identity. `evaluateStudy`'s streaming count/hash/mean/variance summaries alone cannot support return resampling; reconstruct through retained valuation audits using the declared grid or save the panel during the attempt. Keep reset folds separate and preserve dependence in justified resampling/null methods. Predeclare selection treatment and avoid choosing inference settings to make the observed winner significant.
+
+The shared trading-study API has no built-in probabilistic/selection-adjusted Sharpe or strategy-return confidence interval. Existing speed-benchmark bootstrap measures engine performance, not trading returns. Explain the separately justified method, dependence/selection assumptions and insufficient evidence. A formula cannot repair incomplete search history or bad fills; ordinary Sharpe is not a probability of future profit.
 
 Distinguish development fixtures, exploratory validation, released final evaluation and calibrated paper/live execution. The local framework is synchronous replay and has no live transport/reconciliation implementation. Its proof contract covers specified arithmetic/policy laws, not arbitrary host code, external estimators, vendor data, queue realism or future profitability.
 

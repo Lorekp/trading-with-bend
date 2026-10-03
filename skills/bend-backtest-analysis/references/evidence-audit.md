@@ -4,6 +4,8 @@
 
 Use the registry's `listExperiments`, `readExperimentResult(root, key)` and `verifyExperimentArtifacts(root, key)` instead of trusting an exported best-result file. Preserve status/error and retried/abandoned attempts. Results, models and audit references must match their inventories and the study's actual input/build/dependency identity.
 
+For official campaigns, reopen the frozen specification and call `campaign.report()`. Verify sealed membership and terminal status for every admission before interpreting official selection. Unregistered/pending work is incomplete, not an omitted failure. Retain the immutable report, all attempts, bundle/input stores and coordinator's cross-campaign search inventory. The ETH demo's summary worker is not automatically a complete `validation-study-v1` campaign worker.
+
 For disk reports, `readReplayAudit(report.audit, 'fills')` and the corresponding postings/orders/valuations expose complete retained streams without full materialization. Keep the manifest and database/shards at their referenced paths. A detached summary or disk checkpoint descriptor is not the complete evidence package. Prefer the existing `scripts/audit-eth-campaign.mjs` for the ETH campaign whose artifact schema it supports; do not assume that specific script audits every arbitrary worker.
 
 Check `status`, quality failures and poisoned invalid input before treating performance fields as valid. An ordinary risk rejection is an economic outcome; a malformed dataset/runtime reconciliation failure invalidates the run. Stale or unmarked inventory cannot silently become a zero loss. Snapshot/quote checksums certify content identity, not vendor truth or completeness.

@@ -13,6 +13,6 @@ For features, labels, scalers, ridge or external model adapters, read [training-
 
 For sequences, early stopping, retraining timing or forecast evaluation, read [forecast-availability.md](references/forecast-availability.md). Verify the full feature/schema/target contract and distinguish retrospective validation diagnostics from predictions executable at those timestamps.
 
-Save model, preprocessing, per-fold diagnostics and actual runtime identity through the experiment registry. Model hash and shapes alone do not establish correctness or availability. Freezing a callback does not prevent an external trainer from reading hidden data.
+Save model, preprocessing, per-fold diagnostics and actual runtime identity through the experiment registry. For an official campaign, use the campaign specialist's frozen inputs and admission guidance; Python/foreign trainers require a declared trusted-worker campaign. Model hash and shapes alone do not establish correctness or availability. Keep final values with the coordinator even when the trainer has ordinary filesystem access.
 
-Final rows are released only through `withFinalHoldout` after selection/protocol freeze. Forecast error, calibrated fills, net profitability and formal policy proof are different claims: report only what the requested evaluation actually demonstrates.
+Official campaign final rows are released through `releaseCampaignFinal` after selection/protocol freeze, using the shared final authority; `withFinalHoldout` remains the lower-level helper. Forecast error, calibrated fills, net profitability and formal policy proof are different claims: report only what the requested evaluation actually demonstrates.

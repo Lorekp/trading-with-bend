@@ -24,6 +24,18 @@ Input chronology errors are errors, not a reason to sort records. Preserve stabl
 
 Processed L2/BBO observations are information. `loadProcessedDerivativeData` accepts a separately explicit execution proxy, including displayed-size participation or bar-volume/spread assumptions. Neither proxy establishes queue position or actual historical fills. Funding data becomes a cashflow only through the derivative venue's declared contract and schedule; missing funding is not a zero rate.
 
+## ETH intraday admission
+
+Before a bounded cross-venue study, produce an inventory for the exact selected interval and files:
+
+- Verify manifest/archive hashes and actual source/venue overlap, including warmup and terminal boundaries; a complete manifest flag or monthly filename is insufficient. Required missing streams fail explicitly. Inspect gaps, L2 snapshot/update reconstruction and checksums where available, and stale BBO/marks.
+- Distinguish exchange event, publication and measured receipt times. Historical timestamps without local receipt evidence cannot establish a subsecond cross-venue lead/lag advantage. Record publication-delay assumptions and their stress range.
+- Freeze canonical instrument/settlement units, multiplier, tick/lot size, margin and fee tier. Retrieval-time instrument metadata needs an explicit historical-contract assumption; it is not historical specification evidence.
+- Cover every funding slot needed by the venue, including zeros, with marks and settlement inputs. Ex-post settled funding is an execution cashflow, not a pre-settlement forecast. A funding/premium signal requires defensible publication-time history for the value visible at each decision.
+- Declare displayed-size participation or candle spread/volume proxies, taker costs, latency, partial-fill behavior and capacity limits independently from signal data. Candles alone support a labeled execution proxy, not calibrated executable perpetual evidence.
+
+Snapshot only required exploration files through campaign `inputFiles`; final market values remain coordinator-owned. Record known previous period exposure before assigning confirmation windows. Use `docs/MARKET_DATA.md`, `docs/DERIVATIVES.md` and current loaders as the authoritative contracts rather than assuming the ETH demo's older inventory covers all downloaded data.
+
 ## Basis
 
 Local: `docs/MARKET_DATA.md`, `docs/ADAPTERS.md`, `docs/DERIVATIVES.md`, `src/market-data.mjs`, `src/adapter-contracts.d.ts`.

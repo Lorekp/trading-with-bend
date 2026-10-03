@@ -26,6 +26,14 @@ For stress comparisons, vary fee/spread, participation, latency and staleness th
 
 Open holdings and unrealized losses remain at termination; no implicit liquidation or hypothetical cash exit fee is invented. Stale terminal inventory marks invalidate normal performance. A position cap cannot undo fills or guarantee an immediate exit.
 
+## Intraday perpetual checks
+
+Freeze common capital/notional, gross exposure, shorting policy and maximum holding time before comparing candidates. Specify the clock for daily boundaries and whether holdings cross funding settlements; crypto has no universal close. Track holding time and exits from actual fills/holdings, and distinguish an exit target from a completed flat position under partial fills/cancel latency.
+
+Use `DerivativeExecutionVenue` for perpetual economics with admitted historical-contract assumptions, actual/declared taker fee tier, marks and all funding slots. Keep funding information publication separate from settlement cashflows: a settled rate cannot become an earlier forecast. Verify source/venue coverage through warmup, decisions and the terminal boundary; stale books/marks and missing required settlements invalidate ordinary performance.
+
+Run a tiny registered path with delayed/partial fills, open exposure, fees/funding and common cash/hold controls before the bounded search. Predeclare higher-cost/delay/lower-liquidity scenarios and retain their separate comparison identities. Candle and displayed-depth proxies remain assumptions; queue priority, impact and observed fills need later calibration/reconciliation evidence. A cash-price ETH bar run cannot substantiate executable perpetual returns.
+
 ## Continuation and evidence
 
 Cash engine checkpoints retain event/accounting replay, not strategy/model/source state. Version-3 disk checkpoints also require their referenced audit artifacts. Derivative continuation currently requires deterministic replay; it does not inherit the cash checkpoint interface. Preserve feature/model state separately or replay it.

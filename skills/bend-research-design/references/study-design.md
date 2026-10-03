@@ -19,12 +19,19 @@ Record these fields in an immutable `context.writeArtifact('research-plan.json',
 | Information timing | Observation, publication, revision, label maturity and deployment timing |
 | Split | `walkForwardSplits` options, purge/embargo rationale and `finalStart` |
 | Execution | Venue, units, fees, spread/liquidity/latency, funding/margin where applicable |
+| Risk and horizon | Common initial capital/notional, gross exposure, shorting, sizing, holding limit and funding/day-boundary policy |
 | Controls | Cash/hold or zero/ridge baselines, ablations and robustness scenarios |
-| Objective and budget | Primary validation objective, candidate count and stopping rule |
+| Objective and budget | Official ranking, total candidates/stress jobs across agents/campaigns and stopping rule |
+| Economic acceptance | Required net benchmark improvement, loss/drawdown/exposure limits, capacity assumptions and reject decision |
+| Search and uncertainty | Prior studies/manual changes/data exposure, regular paired return evidence and dependence-aware analysis plan |
 | Falsifier | Evidence that would invalidate or materially weaken the thesis |
-| Final-release policy | Strategy/protocol freeze and existing holdout identity |
+| Final-release policy | Coordinator, shared absolute authority, safe exploration inputs and credible untouched evidence |
 
 This is an authored research-plan artifact, not a new framework schema. `evaluateStudy` accepts only its existing protocol keys: `warmup`, `account`, `intervalMs`, `periodsPerYear`, `maxStalenessMs`. Keep hypothesis metadata separate; adding extra protocol keys causes rejection.
+
+Freeze capital and risk scale across ranked candidates, an explicit maximum holding time, actual/assumed fee tier and minimum useful net edge. A 24/7 market has no universal daily close; specify the clock for any daily boundary and whether positions may cross funding settlements. Set numerical acceptance thresholds from the requested economic objective and admitted execution assumptions before outcomes. Raw-return ranking can choose a losing candidate: if its separate acceptance rule fails, report "no acceptable strategy" without promoting another candidate. A constrained selector requires a changed, tested selection contract before the search.
+
+For a profitability-seeking swarm, predeclare a justified method for uncertainty in paired candidate/control returns that respects serial dependence and the combined selection process. Specify regular sampling, resampling/null assumptions, selection treatment and evidence needed. Missing prior-search evidence or insufficient coverage limits inference; record that limitation instead of producing an unsupported confidence score. The shared toolkit does not supply selection-adjusted trading-return inference.
 
 Use `evaluateStudy({ samples, plan, protocol }, prepareFold)` for all-fold validation. Its callback receives verified training and validation artifacts. Supply a fresh strategy and a fresh `createReplay({ variant })` account for each variant and fold, with identical information, execution, instrument and model identities. Warmup is history-only and accounts reset per fold. Results describe independent windows, not a continuous compounded deployment.
 
