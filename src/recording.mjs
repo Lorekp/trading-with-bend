@@ -191,6 +191,17 @@ export function openReplayAudit(input) {
   db.exec('PRAGMA cache_size=-2048; PRAGMA query_only=ON');
   const exists = db.prepare('SELECT 1 FROM keyed WHERE namespace=? AND key=?');
   const cursors = new Set();
+  let lastChunk;
+  // Concurrent readers often consume the same immutable chunk. Retain only one;
+  // each cursor still checks its own sequence and complete content digest.
+  const chunkValues = (stream, row) => {
+    const payload = Buffer.from(row.payload.buffer, row.payload.byteOffset, row.payload.byteLength);
+    if (lastChunk?.stream === stream && lastChunk.ordinal === row.ordinal &&
+        lastChunk.count === row.count && lastChunk.payload.equals(payload)) return lastChunk.values;
+    const values = decodeChunk(row);
+    lastChunk = { stream, ordinal: row.ordinal, count: row.count, payload, values };
+    return values;
+  };
   let closed = false;
   const assertOpen = () => requireThat(!closed, 'AUDIT_CLOSED', 'Audit reader is closed');
   return {
@@ -207,7 +218,7 @@ export function openReplayAudit(input) {
         const row = next.value;
         if (spec.kind === 'series') {
           requireThat(row.ordinal === digest.count, 'AUDIT_CORRUPT', 'Audit chunk sequence differs');
-          for (const value of decodeChunk(row)) { assertOpen(); digest.push(value); yield value; }
+          for (const value of chunkValues(stream, row)) { assertOpen(); digest.push(value); yield value; }
         } else { const value=decode(row.payload); digest.push(value); yield value; }
       } } finally { if (cursors.delete(cursor)) cursor.return?.(); }
       requireThat(digest.count===spec.count && digest.digest()===spec.hash,'AUDIT_CORRUPT','Audit content identity differs');
@@ -217,7 +228,7 @@ export function openReplayAudit(input) {
       if (closed) return;
       closed = true;
       try { for (const cursor of cursors) cursor.return?.(); }
-      finally { cursors.clear(); db.close(); }
+      finally { cursors.clear(); lastChunk = undefined; db.close(); }
     },
   };
 }
