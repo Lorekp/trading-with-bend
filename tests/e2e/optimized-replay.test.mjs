@@ -19,6 +19,7 @@ import { QuoteExecutionVenue } from '../../src/execution-venue.mjs';
 import { runStrategy as replay } from '../../src/replay.mjs';
 import { sampleEquity } from '../../src/study.mjs';
 import { listExperiments, readExperimentResult } from '../../src/experiments.mjs';
+import { runMemoryBenchmark } from '../../experiments/memory/benchmark.mjs';
 
 test('default storage keeps historical orders out of matching across 6000 submit/cancel cycles', () => {
   const run = new Backtest({ ...config, cancelLatencyMs: '0' }, { traceMode: 'compact' });
@@ -616,19 +617,26 @@ test('five campaign workers reuse one admitted dataset and match independent mem
   const datasetHash = data.manifest.datasetHash, manifestPath = data.manifest.audit.manifestPath;
   data.close();
   const admittedBytes = readFileSync(manifestPath), campaign = join(root, 'campaign');
-  const result = spawnSync(process.execPath, ['scripts/benchmark-campaign.mjs', '--output', campaign,
-    '--dataset', manifestPath, '--ticks', String(count), '--workers', '5', '--order-every', String(orderEvery)], {
+  const result = spawnSync(process.execPath, ['scripts/benchmark.mjs', '--suite', 'campaign-v1', '--output', campaign,
+    '--dataset', manifestPath, '--ticks', String(count), '--workers', '5', '--jobs', '5', '--repetitions', '1',
+    '--node-options', '--max-old-space-size=128', '--order-every', String(orderEvery)], {
     encoding: 'utf8', timeout: 90000, windowsHide: true,
     env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=128` }
   });
+  if (result.status !== 0 && result.stderr.includes('COLLECTOR_UNAVAILABLE')) { t.skip('Whole-group collector requires delegated cgroup v2 or the Windows compiler'); return; }
   assert.ifError(result.error); assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
   const summary = JSON.parse(readFileSync(join(campaign, 'summary.json'), 'utf8'));
-  assert.equal(summary.workers, 5); assert.equal(summary.count, count);
-  assert.equal(summary.results.length, 5);
-  assert.ok(summary.results.every(row => row.status === 'completed'), JSON.stringify(summary.results));
+  assert.equal(summary.status, 'completed'); assert.equal(summary.cases[0].jobs, 5);
+  const measurement = summary.attempts[0], results = measurement.workload.results;
+  assert.equal(results.length, 5);
+  assert.ok(results.every(row => row.status === 'completed'), JSON.stringify(results));
+  assert.equal(measurement.metrics[0].kind, 'lifetime-high-water');
+  assert.equal(measurement.metrics[0].coverage, 'complete');
+  assert.ok(measurement.metrics[0].value > 0);
+  assert.equal(measurement.workload.runtime.nodeOptions, '--max-old-space-size=128');
   assert.deepEqual(readFileSync(manifestPath), admittedBytes);
   assert.equal(existsSync(join(campaign, 'data')), false, 'Workers reuse the supplied admitted data');
-  const registry = join(campaign, 'registry'), jobs = listExperiments(registry), audits = new Set();
+  const registry = measurement.workload.registry, jobs = listExperiments(registry), audits = new Set();
   assert.equal(jobs.length, 5);
   assert.deepEqual(new Set(jobs.map(job => job.configuration.manifestPath)), new Set([manifestPath]));
   assert.equal(new Set(jobs.map(job => job.attempts.at(-1).workerPid)).size, 5);
@@ -636,9 +644,9 @@ test('five campaign workers reuse one admitted dataset and match independent mem
     assert.equal(job.status, 'completed'); assert.equal(job.attempts.length, 1);
     const actual = readExperimentResult(registry, job.key), index = job.configuration.index;
     const configuration = { instrument, initialCash: '100000000', feePerLot: '1', orderLatencyMs: '0', cancelLatencyMs: '0', maxQuoteAgeMs: '60000',
-      manifest: { datasetVersion: datasetHash, strategyArtifact: 'scaling-roundtrip', evaluationProtocol: 'capacity-only', seed: String(index) } };
-    const venue = new QuoteExecutionVenue({ id: 'scaling-venue', config: configuration, ticks: quotes, maxPositionLots: '1', traceMode: 'compact' });
-    const expected = replay(quoteInformationSource({ id: 'scaling-source', instrument, ticks: quotes }), venue,
+      manifest: { datasetVersion: datasetHash, strategyArtifact: 'memory-roundtrip-v1', evaluationProtocol: 'capacity-only', seed: String(index) } };
+    const venue = new QuoteExecutionVenue({ id: 'memory-venue', config: configuration, ticks: quotes, maxPositionLots: '1', traceMode: 'compact' });
+    const expected = replay(quoteInformationSource({ id: 'memory-source', instrument, ticks: quotes }), venue,
       ({ index: row, ledger }) => row < count - 1 && row % orderEvery === index % orderEvery ? (ledger.quantity === 0n ? '1' : '0') : null,
       { lookback: 256 }).report();
     assert.equal(actual.traceHash, expected.traceHash, job.key);
@@ -652,4 +660,56 @@ test('five campaign workers reuse one admitted dataset and match independent mem
     audits.add(report.audit.manifestPath);
   }
   assert.equal(audits.size, 5, 'Every worker owns its complete audit');
+});
+
+test('memory benchmark validates plans before creating an output population', async t => {
+  const root = auditDirectory(t), output = join(root, 'invalid-plan');
+  for (const plan of [{ version: 1, suite: 'unknown' }, { version: 1, repetitions: 0 },
+    { version: 1, runtime: { nodeOptions: '--expose-gc' } }, { version: 1, arbitrary: true }]) {
+    await assert.rejects(runMemoryBenchmark(plan, { outputDirectory: output }), /BENCHMARK_PLAN/);
+    assert.equal(existsSync(output), false);
+  }
+});
+
+test('memory benchmark observes synchronous buffers and a native descendant in independent groups', { timeout: 120000 }, async t => {
+  const root = auditDirectory(t), output = join(root, 'calibration');
+  let summary;
+  try { summary = await runMemoryBenchmark({ version: 1, suite: 'collector-calibration-v1', repetitions: 2 }, { outputDirectory: output }); }
+  catch (error) { if (error.message.includes('COLLECTOR_UNAVAILABLE')) { t.skip(error.message); return; } throw error; }
+  assert.equal(summary.status, 'completed');
+  const baseline = summary.cases.find(row => row.id === 'calibration-idle').peakBytes.maximum;
+  assert.ok(summary.cases.find(row => row.id === 'calibration-buffer').peakBytes.minimum > baseline + 64 * 1048576);
+  if (process.platform === 'win32') {
+    assert.ok(summary.cases.find(row => row.id === 'calibration-native').peakBytes.minimum > baseline + 64 * 1048576);
+    const native = summary.attempts.find(row => row.caseId === 'calibration-native');
+    const idle = summary.attempts.filter(row => row.caseId === 'calibration-idle');
+    assert.ok(native.measurement.totalProcesses > Math.max(...idle.map(row => row.measurement.totalProcesses)), 'Native descendants are in the measured job');
+    const sequential = summary.cases.find(row => row.id === 'calibration-native-sequential');
+    const overlapping = summary.cases.find(row => row.id === 'calibration-native-overlap');
+    assert.ok(overlapping.peakBytes.minimum > sequential.peakBytes.maximum + 64 * 1048576, 'Simultaneous demand differs from the sum of isolated peaks');
+    const orphan = summary.attempts.find(row => row.caseId === 'calibration-native-orphan');
+    assert.ok(BigInt(orphan.measurement.elapsedNs) - BigInt(orphan.measurement.rootExitElapsedNs) > 100000000n, 'Observe a descendant after its root has exited');
+  }
+  assert.ok(summary.attempts.every(row => row.measurement.rootPid > 0 && row.measurement.rootPid !== process.pid), 'Each attempt runs outside the observer process; OS PIDs may be reused');
+  assert.ok(summary.attempts.every(row => row.metrics[0].coverage === 'complete' && row.measurement.sampleCount > 0));
+  await assert.rejects(runMemoryBenchmark({ version: 1 }, { outputDirectory: output }), { code: 'EEXIST' });
+});
+
+test('memory benchmark retains every timeout and excludes failed peaks from successful summaries', { timeout: 120000 }, async t => {
+  const root = auditDirectory(t), data = await prepareQuoteData(ticks(30).map((row, index) => ({ ...row,
+    symbol: 'BENCH', currency: 'USDT', id: `tick-${index}`, bid: '9999', ask: '10000' })),
+    { instrument: { symbol: 'BENCH', currency: 'USDT', lotSize: '0.001', priceTick: '1' }, directory: join(root, 'fixture') });
+  const manifestPath = data.manifest.audit.manifestPath; data.close();
+  let summary;
+  try { summary = await runMemoryBenchmark({ version: 1, suite: 'replay-v1', ticks: 30, datasetManifest: manifestPath,
+    repetitions: 2, timeoutMs: 1 }, { outputDirectory: join(root, 'timeouts') }); }
+  catch (error) { if (error.message.includes('COLLECTOR_UNAVAILABLE')) { t.skip(error.message); return; } throw error; }
+  assert.equal(summary.status, 'failed'); assert.equal(summary.attempts.length, 2);
+  assert.ok(summary.attempts.every(row => row.status === 'timeout'));
+  assert.equal(summary.cases[0].peakBytes.count, 0); assert.equal(summary.cases[0].peakBytes.median, null);
+  for (const row of summary.attempts) {
+    assert.ok(existsSync(join(summary.outputDirectory, row.id, 'launch.json')));
+    assert.ok(existsSync(join(summary.outputDirectory, row.id, 'completion.json')));
+    assert.ok(row.metrics[0].value > 0, 'Failure measurements remain in the raw population');
+  }
 });
