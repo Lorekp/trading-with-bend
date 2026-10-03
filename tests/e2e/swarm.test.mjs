@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freemem, tmpdir, totalmem } from 'node:os';
@@ -28,6 +28,27 @@ function launch(code, args = []) {
     child.once('close', status => resolve({ status, stdout, stderr }));
   });
   return { child, done };
+}
+
+// Embedded in both child programs so sampled metrics share one implementation.
+function createMetricsWriter(directory, role) {
+  let peakRssBytes = 0;
+  const target = join(directory, `${process.pid}.json`), temporary = `${target}.tmp`;
+  const retryDelay = new Int32Array(new SharedArrayBuffer(4));
+  return () => {
+    const rssBytes = process.memoryUsage().rss;
+    peakRssBytes = Math.max(peakRssBytes, rssBytes);
+    writeFileSync(temporary, JSON.stringify({ pid: process.pid, role, rssBytes, peakRssBytes }));
+    for (let attempt = 0; ; attempt++) {
+      try { renameSync(temporary, target); return; }
+      catch (error) {
+        // Windows readers can briefly prevent replacement. Keep the previous
+        // complete snapshot visible while retrying this fully written file.
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 49) throw error;
+        Atomics.wait(retryDelay, 0, 0, 20);
+      }
+    }
+  };
 }
 
 test('a profiled local swarm keeps one complete population under independent submitters, runners and final authority', { timeout: 240000 }, async t => {
@@ -108,8 +129,9 @@ test('a profiled local swarm keeps one complete population under independent sub
   };
   const monitor = setInterval(sample, 150); t.after(() => clearInterval(monitor));
   const runCode = `import {readFileSync,writeFileSync,renameSync} from 'node:fs';import {join} from 'node:path';import {runQueue} from ${JSON.stringify(api)};
-    const input=JSON.parse(readFileSync(process.argv[1],'utf8'));let peakRssBytes=0;
-    const metric=()=>{const rssBytes=process.memoryUsage().rss;peakRssBytes=Math.max(peakRssBytes,rssBytes);const target=join(input.metrics,process.pid+'.json');writeFileSync(target+'.tmp',JSON.stringify({pid:process.pid,role:'runner',rssBytes,peakRssBytes}));renameSync(target+'.tmp',target);};
+    ${createMetricsWriter.toString()}
+    const input=JSON.parse(readFileSync(process.argv[1],'utf8'));
+    const metric=createMetricsWriter(input.metrics,'runner');
     metric();const timer=setInterval(metric,100);
     try{await runQueue(join(input.root,'experiments'),{admissionRoot:input.admissionRoot,resourceBudget:input.spec.resourceBudget,concurrency:4,pollMs:50,idleMs:2500,timeoutMs:60000,keyPrefix:process.argv[2]??'',maxLogBytes:65536,maxArtifactBytes:1048576,maxResultBytes:1048576});}
     finally{clearInterval(timer);metric();}console.log(JSON.stringify({done:true}));`;
@@ -130,8 +152,9 @@ test('a profiled local swarm keeps one complete population under independent sub
   const runners = [launch(runCode, [payload]), launch(runCode, [payload])]; children.push(...runners);
   await eventually(() => queueStatus(campaign.registryRoot, { admissionRoot }).reserved.workers > 0);
   const submitCode = `import {readFileSync,writeFileSync,renameSync} from 'node:fs';import {join} from 'node:path';import {createCampaign} from ${JSON.stringify(api)};
-    const {root,spec,job,metrics}=JSON.parse(readFileSync(process.argv[1],'utf8'));const campaign=createCampaign(root,spec),offset=Number(process.argv[2]);let peakRssBytes=0;
-    const metric=()=>{const rssBytes=process.memoryUsage().rss;peakRssBytes=Math.max(peakRssBytes,rssBytes);const target=join(metrics,process.pid+'.json');writeFileSync(target+'.tmp',JSON.stringify({pid:process.pid,role:'submitter',rssBytes,peakRssBytes}));renameSync(target+'.tmp',target);};metric();
+    ${createMetricsWriter.toString()}
+    const {root,spec,job,metrics}=JSON.parse(readFileSync(process.argv[1],'utf8'));const campaign=createCampaign(root,spec),offset=Number(process.argv[2]);
+    const metric=createMetricsWriter(metrics,'submitter');metric();
     for(let i=offset;i<offset+15;i++){campaign.submit({...job,key:'trial-'+String(i).padStart(2,'0'),configuration:{...job.configuration,fail:i===0}});metric();}
     console.log(JSON.stringify({submitted:15}));`;
   const submitters = [launch(submitCode, [payload, '0']), launch(submitCode, [payload, '15'])]; children.push(...submitters);

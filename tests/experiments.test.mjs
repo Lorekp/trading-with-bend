@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -550,4 +552,55 @@ export default async configuration => {
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(listExperiments(registry).map(job => job.status), ['completed', 'completed']);
   assert.equal(queueStatus(registry).reserved.workers, 0);
+});
+
+
+test('telemetry atomically retries transient Windows locks and preserves progress', { skip: process.platform !== 'win32' }, t => {
+  const { registry } = fixture(t);
+  const originalRename = fs.renameSync;
+  let denied = 0;
+  fs.renameSync = (source, destination) => {
+    if (String(destination).endsWith('telemetry.json') && denied++ === 0) throw Object.assign(new Error('Transient reader lock'), { code: 'EPERM' });
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  try {
+    runExperiment(registry, {}, (configuration, context) => {
+      context.reportProgress({ stage: 'training' });
+      context.heartbeat();
+      return { score: 1 };
+    });
+  } finally { fs.renameSync = originalRename; syncBuiltinESMExports(); }
+  assert.ok(denied >= 3, 'The first report retries before the later heartbeat');
+  const [job] = listExperiments(registry), attempt = job.attempts[0];
+  assert.equal(job.status, 'completed');
+  assert.deepEqual(attempt.telemetry.progress, { stage: 'training' });
+  assert.equal(readdirSync(resolve(attempt.outputDirectory, '..')).some(name => name.startsWith('.telemetry-')), false);
+});
+
+test('telemetry persistent and unrelated publication errors propagate and remove staged files', t => {
+  const { registry } = fixture(t);
+  const originalRename = fs.renameSync;
+  for (const code of ['EPERM', 'EIO']) {
+    let calls = 0;
+    fs.renameSync = (source, destination) => {
+      if (String(destination).endsWith('telemetry.json')) { calls++; throw Object.assign(new Error('Persistent telemetry error'), { code }); }
+      return originalRename(source, destination);
+    };
+    syncBuiltinESMExports();
+    const started = Date.now();
+    try {
+      assert.throws(() => runExperiment(registry, { code }, (configuration, context) => {
+        context.reportProgress({ stage: 'started' });
+        return { score: 1 };
+      }), { code });
+    } finally { fs.renameSync = originalRename; syncBuiltinESMExports(); }
+    if (code === 'EPERM' && process.platform === 'win32') { assert.ok(calls > 1); assert.ok(Date.now() - started < 2000, 'Persistent lock retry remains bounded'); }
+    else assert.equal(calls, 1, 'Unrelated errors are never retried');
+    const job = listExperiments(registry).find(job => job.configuration.code === code), attempt = job.attempts[0];
+    assert.equal(job.status, 'failed');
+    assert.equal(attempt.error.code, code);
+    assert.equal(attempt.telemetry, undefined);
+    assert.equal(readdirSync(resolve(attempt.outputDirectory, '..')).some(name => name.startsWith('.telemetry-')), false);
+  }
 });

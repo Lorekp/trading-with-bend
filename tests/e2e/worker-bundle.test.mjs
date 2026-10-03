@@ -9,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { canonical, hash } from '../../src/core.mjs';
 import { sourceManifest } from '../../src/provenance.mjs';
 import { createWorkerBundle, verifyWorkerBundle, workerBundleExecution } from '../../src/worker-bundle.mjs';
+import { Backtest } from '../../src/framework.mjs';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const fileHash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -61,6 +62,34 @@ test('real frozen workers survive checkout edits, preserve package imports and d
   writeFileSync(join(f.sourceRoot, 'src/core.mjs'), 'throw new Error("checkout mutated");\n');
   writeFileSync(f.data, 'changed original data');
   assert.deepEqual(await execute(frozen.bundle, frozen.configuration, f.registry), { value: 7, data: 'training', denied: 'ERR_ACCESS_DENIED', writeDenied: 'ERR_ACCESS_DENIED', note: f.data });
+  verifyWorkerBundle(frozen.bundle);
+});
+
+test('constrained frozen workers publish complete disk replay audits and artifact bytes with narrow filesystem grants', async t => {
+  const f = fixture(t);
+  writeFileSync(f.worker, `import { Backtest } from '../../src/framework.mjs';
+import { readReplayAudit } from '../../src/recording.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+export default async function(configuration, context) {
+  const replay = new Backtest(configuration.config, { auditDirectory: join(context.outputDirectory, 'audit') }).run(configuration.ticks);
+  const report = replay.report();
+  const eventCount = [...readReplayAudit(report, 'events')].length;
+  context.writeArtifact('report.json', report);
+  let denied;
+  try { readFileSync(configuration.hidden, 'utf8'); } catch(error) { denied = error.code; }
+  return { ledger: report.ledger, performance: report.performance, traceHash: report.traceHash, eventCount, denied };
+}
+`);
+  const instrument = { symbol: 'BUNDLE', currency: 'EUR', lotSize: '1', priceTick: '1' };
+  const config = { instrument, initialCash: '1000', feePerLot: '0', orderLatencyMs: '1', cancelLatencyMs: '0', maxQuoteAgeMs: '10',
+    manifest: { datasetVersion: 'bundle-fixture', strategyArtifact: 'cash', evaluationProtocol: 'validation', seed: '3' } };
+  const ticks = Array.from({ length: 3 }, (_, index) => ({ id: `quote-${index}`, type: 'tick', time: String(index * 10), sourceTime: String(index * 10),
+    sequence: String(index + 1), symbol: instrument.symbol, currency: instrument.currency, bid: String(100 + index), ask: String(101 + index), bidLots: '10', askLots: '10' }));
+  const reference = new Backtest(config, { traceMode: 'compact' }).run(ticks).report();
+  const frozen = createWorkerBundle(f.registry, { sourceRoot: f.sourceRoot, workerModule: f.worker, configuration: { config, ticks, hidden: f.hidden } });
+  assert.deepEqual(await execute(frozen.bundle, frozen.configuration, f.registry), { ledger: reference.ledger, performance: reference.performance, traceHash: reference.traceHash,
+    eventCount: ticks.length, denied: 'ERR_ACCESS_DENIED' });
   verifyWorkerBundle(frozen.bundle);
 });
 

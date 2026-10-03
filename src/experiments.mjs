@@ -262,6 +262,21 @@ function claimAttempt(jobDirectory, token, supervisorPid, generation) {
   return { claim, path: attemptDirectory(jobDirectory, token) };
 }
 
+function replaceTelemetry(temporary, destination) {
+  const deadline = Date.now() + 100;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try { renameSync(temporary, destination); return; }
+    catch (error) {
+      // Windows readers and antivirus can briefly deny atomic replacement.
+      // Preserve the previous complete report while retrying the same staged
+      // file; persistent errors still fail the attempt after a bounded wait.
+      if (process.platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || Date.now() >= deadline) throw error;
+      Atomics.wait(pause, 0, 0, Math.min(5, Math.max(1, deadline - Date.now())));
+    }
+  }
+}
+
 export function experimentContext({ manifest, claim, path, maxArtifactBytes = null }) {
   const outputDirectory = join(path, 'artifacts');
   let latestProgress;
@@ -273,7 +288,7 @@ export function experimentContext({ manifest, claim, path, maxArtifactBytes = nu
     assert(Buffer.byteLength(bytes) <= 65536, 'PROGRESS_LIMIT', 'Progress reports must fit in 64 KiB');
     latestProgress = nextProgress;
     const temporary = join(path, `.telemetry-${randomUUID()}.tmp`);
-    try { writeFileSync(temporary, bytes, { flag: 'wx' }); renameSync(temporary, join(path, 'telemetry.json')); }
+    try { writeFileSync(temporary, bytes, { flag: 'wx' }); replaceTelemetry(temporary, join(path, 'telemetry.json')); }
     finally { if (existsSync(temporary)) unlinkSync(temporary); }
     return report;
   };

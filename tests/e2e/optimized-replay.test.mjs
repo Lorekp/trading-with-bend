@@ -492,7 +492,11 @@ test('a durability failure after writing manifest bytes cannot publish an audit 
     let injected = 0;
     fs.writeFileSync = (path, ...args) => {
       const result = original(path, ...args);
-      if (dirname(String(path)) === directory && String(path).includes('.json')) {
+      // Publication writes a synchronized temporary descriptor. Identify the
+      // audit manifest by its bytes so a failed write cannot commit it.
+      let manifest;
+      try { manifest = JSON.parse(String(args[0])); } catch {}
+      if (manifest?.format === 'bend-replay-audit-v2') {
         injected++;
         throw Object.assign(new Error('Durability failure after manifest bytes were written'), { code: 'EIO' });
       }
