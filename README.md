@@ -2,7 +2,9 @@
 
 A runnable, proof-oriented backtesting reference framework. The **cash accounting, order admission, reservations, cancellation and FIFO matching engine is written in Bend**. Node handles validated JSON input, strategy callbacks, checkpoints, reports and experiment registration around the compiled Bend module. Archive readers use the locked `tar-stream` and `yauzl` dependencies.
 
-For parallel strategy agents and ML research, start with [the shared research guide](docs/RESEARCH.md) and `AGENTS.md`. The toolkit now includes a durable parallel job queue, programmatic strategies, causal features, ridge/OLS training, purged walk-forward evaluation, persistent final-holdout gates, parameter grids and reusable artifact checks. `src/index.mjs` exports the shared API.
+For parallel strategy agents and ML research, start with [the shared research guide](docs/RESEARCH.md) and `AGENTS.md`. Official campaigns own the complete trial population, shared resource admission, frozen workers/input snapshots, cancellation and verified final release. The toolkit also includes programmatic strategies, causal features, ridge/OLS training, purged walk-forward evaluation, parameter grids and reusable validation-fold evidence. `src/index.mjs` exports the shared API.
+
+Demanding local swarms should use [`createCampaign`](docs/RESEARCH.md#official-campaigns), one shared admission budget and a canonical final authority directory. Filesystem-constrained workers are the default; foreign/Python training requires an explicitly trusted campaign. Admission estimates and V8 heap limits are not OS resource quotas. After building, `node --test tests/e2e/swarm.test.mjs` runs the profiled 34-trial acceptance workflow. Multi-host execution is unsupported.
 
 For the downloaded ETHUSDT data, use [the ETH experiment guide](docs/ETH_EXPERIMENTS.md). `npm run eth-demo` runs six registered rule/ML scenarios over September's 43,200 minute candles, resampled into 8,640 completed five-minute bars. The source is **USD-M perpetual data with missing bookTicker**; these runs explicitly use a cash-only price proxy with assumed execution, not perpetual-futures accounting.
 

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { canonicalExperimentJson, deterministicSeed, enqueueExperiment, listExperiments, readExperimentResult, recoverExperiment, runExperiment, runQueue, verifyExperimentArtifacts, writeExperimentArtifact } from '../src/experiments.mjs';
+import { cancelExperiment, canonicalExperimentJson, deterministicSeed, enqueueExperiment, listExperiments, queueStatus, recoverQueue, readExperimentResult, recoverExperiment, runExperiment, runQueue, verifyExperimentArtifacts, writeExperimentArtifact } from '../src/experiments.mjs';
 
 const api = new URL('../src/experiments.mjs', import.meta.url).href;
 
@@ -382,4 +382,172 @@ test('CLI enqueues, works and reports machine-readable records', async t => {
   const status = await subprocess([fileURLToPath(cli), 'status', registry]).done;
   assert.equal(status.code, 0, status.stderr);
   assert.equal(JSON.parse(status.stdout)[0].status, 'completed');
+});
+
+
+test('shared admission budgets bound independent runners and resource declarations are immutable', async t => {
+  const { registry, worker, root } = fixture(t, `
+import { writeFileSync, readdirSync, unlinkSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+export default async (configuration, context) => {
+  const marker = join(configuration.active, context.key);
+  writeFileSync(marker, String(process.pid), { flag: 'wx' });
+  if (readdirSync(configuration.active).length > 2) throw new Error('Shared budget exceeded');
+  context.reportProgress({ stage: 'waiting' });
+  while (!existsSync(configuration.release)) await delay(5);
+  unlinkSync(marker);
+  return { threads: process.env.OMP_NUM_THREADS };
+}`);
+  const active = join(root, 'active'), release = join(root, 'release'); mkdirSync(active);
+  const resourceBudget = { workers: 2, cpuThreads: 4, memoryMiB: 256 };
+  for (let i = 0; i < 6; i++) enqueueExperiment(registry, { key: `shared-${i}`, configuration: { active, release }, workerModule: worker, resources: { cpuThreads: 2, memoryMiB: 128 } });
+  assert.throws(() => enqueueExperiment(registry, { key: 'shared-0', configuration: { active, release }, workerModule: worker, resources: { cpuThreads: 1, memoryMiB: 128 } }), { code: 'EXPERIMENT_COLLISION' });
+  const command = `import { runQueue } from ${JSON.stringify(api)}; await runQueue(${JSON.stringify(registry)}, { concurrency: 4, resourceBudget: ${JSON.stringify(resourceBudget)}, timeoutMs: 15000 });`;
+  const runners = [runProcess(command), runProcess(command)];
+  t.after(() => { for (const runner of runners) runner.child.kill(); });
+  await eventually(() => readdirSync(active).length === 2);
+  await delay(100);
+  assert.equal(readdirSync(active).length, 2);
+  assert.deepEqual(queueStatus(registry).reserved, { workers: 2, cpuThreads: 4, memoryMiB: 256 });
+  assert.ok(listExperiments(registry).filter(job => job.status === 'running').every(job => job.attempts[0].telemetry.progress.stage === 'waiting'));
+  writeFileSync(release, 'go');
+  for (const result of await Promise.all(runners.map(runner => runner.done))) assert.equal(result.code, 0, result.stderr);
+  assert.equal(queueStatus(registry).reserved.workers, 0);
+  for (const job of listExperiments(registry)) { assert.equal(job.status, 'completed'); assert.equal(readExperimentResult(registry, job.key).threads, '2'); }
+  await assert.rejects(runQueue(registry, { resourceBudget: { workers: 3, cpuThreads: 4, memoryMiB: 256 } }), { code: 'BUDGET_COLLISION' });
+});
+
+test('continuous submission, durable cancellation, output quotas, and abort shutdown cross the runner interface', async t => {
+  const { registry, worker } = fixture(t, `
+import { setTimeout as delay } from 'node:timers/promises';
+export default async (configuration, context) => {
+  context.reportProgress({ started: true });
+  if (configuration.mode === 'result') return { value: 'x'.repeat(4096) };
+  if (configuration.mode === 'log') console.log('x'.repeat(4096));
+  if (configuration.mode === 'artifact') context.writeArtifact('large.json', { value: 'x'.repeat(4096) });
+  if (configuration.mode === 'hang') await new Promise(() => setInterval(() => {}, 1000));
+  await delay(40);
+  return { score: 1 };
+}`);
+  enqueueExperiment(registry, { key: 'never-started', configuration: {}, workerModule: worker });
+  assert.equal(cancelExperiment(registry, 'never-started').status, 'cancelled');
+  const continuous = runQueue(registry, { idleMs: 200, pollMs: 10, maxLogBytes: 1024, maxArtifactBytes: 1024, maxResultBytes: 1024, timeoutMs: 5000 });
+  await delay(30);
+  for (const mode of ['log', 'artifact', 'result', 'success']) enqueueExperiment(registry, { key: mode, configuration: { mode }, workerModule: worker });
+  await continuous;
+  const jobs = listExperiments(registry);
+  assert.equal(jobs.find(job => job.key === 'log').attempts[0].error.code, 'LOG_LIMIT');
+  assert.equal(jobs.find(job => job.key === 'artifact').attempts[0].error.code, 'ARTIFACT_LIMIT');
+  assert.equal(jobs.find(job => job.key === 'result').attempts[0].error.code, 'RESULT_LIMIT');
+  assert.equal(jobs.find(job => job.key === 'success').status, 'completed');
+  enqueueExperiment(registry, { key: 'running-cancel', configuration: { mode: 'hang' }, workerModule: worker });
+  const cancellable = runQueue(registry, { pollMs: 10 });
+  await eventually(() => listExperiments(registry).find(job => job.key === 'running-cancel')?.status === 'running');
+  cancelExperiment(registry, 'running-cancel', 'Campaign cancelled');
+  await cancellable;
+  assert.equal(listExperiments(registry).find(job => job.key === 'running-cancel').status, 'cancelled');
+  for (const shutdown of ['drain', 'cancel']) {
+    enqueueExperiment(registry, { key: `abort-${shutdown}`, configuration: { mode: shutdown === 'cancel' ? 'hang' : 'success' }, workerModule: worker });
+    const controller = new AbortController();
+    const running = runQueue(registry, { signal: controller.signal, shutdown, keyPrefix: `abort-${shutdown}`, pollMs: 10 });
+    await eventually(() => listExperiments(registry).find(job => job.key === `abort-${shutdown}`)?.status === 'running');
+    controller.abort(); await running;
+    assert.equal(listExperiments(registry).find(job => job.key === `abort-${shutdown}`).status, shutdown === 'cancel' ? 'cancelled' : 'completed');
+  }
+  assert.equal(queueStatus(registry).supervisors.length, 0);
+});
+
+test('memory budgets refuse undeclared jobs and a shared admission directory spans registries', async t => {
+  const { registry, worker, root } = fixture(t, `
+import { setTimeout as delay } from 'node:timers/promises';
+export default async () => { await delay(80); return { score: 1 }; }`);
+  const second = join(root, 'second'), admissionRoot = join(root, 'shared-admission');
+  enqueueExperiment(registry, { key: 'first', configuration: {}, workerModule: worker });
+  await assert.rejects(runQueue(registry, { resourceBudget: { workers: 1, cpuThreads: 1, memoryMiB: 128 } }), { code: 'RESOURCE_BUDGET' });
+  await assert.rejects(runQueue(registry, { resourceBudget: { worker: 1 } }), { code: 'INVALID_BUDGET' });
+  assert.throws(() => enqueueExperiment(registry, { key: 'typo', configuration: {}, workerModule: worker, resources: { memoryMB: 128 } }), { code: 'INVALID_RESOURCES' });
+  const resources = { cpuThreads: 1, memoryMiB: 128 };
+  enqueueExperiment(second, { key: 'second', configuration: {}, workerModule: worker, resources });
+  // Use an independent registry without the undeclared job for shared admission.
+  const third = join(root, 'third');
+  enqueueExperiment(third, { key: 'third', configuration: {}, workerModule: worker, resources });
+  const options = { admissionRoot, resourceBudget: { workers: 1, cpuThreads: 1, memoryMiB: 128 }, concurrency: 3, pollMs: 10 };
+  await Promise.all([runQueue(second, options), runQueue(third, options)]);
+  assert.equal(listExperiments(second)[0].status, 'completed');
+  assert.equal(listExperiments(third)[0].status, 'completed');
+  assert.equal(queueStatus(second, { admissionRoot }).reserved.workers, 0);
+  assert.deepEqual(recoverQueue(second, { admissionRoot }).reserved, { workers: 0, cpuThreads: 0, memoryMiB: 0 });
+});
+
+
+test('external admission recovery never releases live ownership and dead attempts still need explicit recovery', async t => {
+  const { registry, worker, root } = fixture(t, `
+import { existsSync } from 'node:fs';
+export default async configuration => {
+  if (!existsSync(configuration.release)) await new Promise(() => setInterval(() => {}, 1000));
+  return { recovered: true };
+}`);
+  const release = join(root, 'release'), admissionRoot = join(root, 'external-admission');
+  enqueueExperiment(registry, { key: 'interrupted', configuration: { release }, workerModule: worker });
+  const runner = runProcess(`import { runQueue } from ${JSON.stringify(api)}; await runQueue(${JSON.stringify(registry)}, { admissionRoot: ${JSON.stringify(admissionRoot)}, timeoutMs: 30000 });`);
+  let workerPid;
+  t.after(() => { runner.child.kill(); if (workerPid) { try { process.kill(workerPid); } catch {} } });
+  await eventually(() => listExperiments(registry)[0]?.status === 'running');
+  workerPid = listExperiments(registry)[0].attempts[0].workerPid;
+  assert.equal(recoverQueue(registry, { admissionRoot }).reserved.workers, 1, 'Live reservations are preserved');
+  runner.child.kill(); await runner.done;
+  try { process.kill(workerPid); } catch {}
+  await eventually(() => { try { process.kill(workerPid, 0); return false; } catch { return true; } });
+  assert.equal(queueStatus(registry, { admissionRoot }).reserved.workers, 1, 'Elapsed time does not release ownership');
+  assert.equal(recoverQueue(registry, { admissionRoot }).reserved.workers, 0);
+  assert.equal(listExperiments(registry)[0].status, 'running', 'Admission recovery does not retry experiments');
+  recoverExperiment(registry, 'interrupted');
+  writeFileSync(release, 'go');
+  await runQueue(registry, { admissionRoot });
+  assert.equal(listExperiments(registry)[0].status, 'completed');
+  assert.equal(listExperiments(registry)[0].attempts.length, 2);
+});
+
+
+test('clean runner release during liveness probing does not become abandoned ownership', async t => {
+  const { registry, worker, root } = fixture(t, `
+import { existsSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+export default async configuration => {
+  if (configuration.release) while (!existsSync(configuration.release)) await delay(2);
+  return { score: 1 };
+}`);
+  const release = join(root, 'release');
+  enqueueExperiment(registry, { key: 'first', configuration: { release }, workerModule: worker });
+  const runner = runProcess(`import { runQueue } from ${JSON.stringify(api)}; await runQueue(${JSON.stringify(registry)}, { keyPrefix: 'first', resourceBudget: { workers: 1, cpuThreads: 1 }, pollMs: 5, timeoutMs: 15000 });`);
+  t.after(() => runner.child.kill());
+  await eventually(() => listExperiments(registry)[0]?.status === 'running');
+  enqueueExperiment(registry, { key: 'next', configuration: {}, workerModule: worker });
+  const originalKill = process.kill;
+  let interleaved = false;
+  process.kill = function(pid, signal) {
+    if (pid === runner.child.pid && signal === 0 && !interleaved) {
+      interleaved = true;
+      // Pause the liveness probe after runQueue has sampled reservations. The
+      // independent runner completes through its normal interface and releases
+      // ownership while this probe is paused. Reporting ESRCH controls the
+      // exact clean-exit interleaving without depending on OS reaping timing.
+      writeFileSync(release, 'go');
+      const until = Date.now() + 8000;
+      while (queueStatus(registry).reservations.some(record => record.supervisorPid === pid)) {
+        if (Date.now() >= until) throw new Error('Clean runner did not release its reservation');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+      throw Object.assign(new Error('Controlled supervisor exit probe'), { code: 'ESRCH' });
+    }
+    return originalKill.call(process, pid, signal);
+  };
+  try { await runQueue(registry, { keyPrefix: 'next', pollMs: 5 }); }
+  finally { process.kill = originalKill; }
+  assert.equal(interleaved, true, 'The liveness probe observes a release after its reservation snapshot');
+  const result = await runner.done;
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(listExperiments(registry).map(job => job.status), ['completed', 'completed']);
+  assert.equal(queueStatus(registry).reserved.workers, 0);
 });

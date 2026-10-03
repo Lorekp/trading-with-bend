@@ -53,7 +53,11 @@ Intentional identity collisions fail rather than silently replacing old evidence
 | `src/evaluation.mjs` | Purged/embargoed walk-forward folds, persistent final-holdout release, regular return metrics, failure-preserving comparison |
 | `src/study.mjs` | All-fold validation replay, history-only warmup, reset accounts, explicit equity sampling, baselines and population-preserving selection |
 | `src/search.mjs` | Bounded deterministic parameter grids, validation-only search jobs |
-| `src/experiments.mjs` | Immutable manifests, atomic job claims, parallel processes, timeouts, logs, explicit abandoned recovery |
+| `src/experiments.mjs` | Immutable manifests, shared resource admission, continuous discovery, cancellation, telemetry, output limits and explicit dead-owner recovery |
+| `src/campaigns.mjs` | Frozen campaign specification, search budget, complete trial membership, sealing and authoritative validation selection |
+| `src/worker-bundle.mjs` | Verified toolkit/package snapshots, declared input copies and filesystem-constrained execution |
+| `src/campaign-final.mjs` | Selected-artifact verification and canonical single-use final release |
+| `src/study-cache.mjs` | Verified reuse of complete validation-fold artifacts across attempts |
 | `src/index.mjs` | Convenience exports of the shared public toolkit |
 
 ## Run multiple agents safely
@@ -66,7 +70,12 @@ Each attempt has a unique output directory and exclusive immutable publication.
 Completed attempts record recursive artifact filenames and SHA-256 hashes, including
 binary models. `readExperimentResult` and `verifyExperimentArtifacts` verify them.
 Two runners can compete for the same key, but only one worker claims a generation.
-Concurrency is a limit per runner, not a machine-wide quota.
+`concurrency` limits each runner. A shared immutable `resourceBudget` limits all
+runners using the same `admissionRoot`; the default admission directory is inside
+the registry. Supply one absolute `admissionRoot` across separate registries when
+they share a host budget. Every participant must use the same budget. This is
+local-host orchestration; claims, process recovery and filesystem guarantees do
+not support multi-host execution.
 
 ```js
 import { gridJobs, enqueueExperiment, runQueue } from './src/index.mjs';
@@ -80,14 +89,19 @@ const jobs = gridJobs({
   maxTrials: 100
 });
 for (const job of jobs) enqueueExperiment('output/shared-registry', job);
-await runQueue('output/shared-registry', { concurrency: 4, timeoutMs: 120000 });
+await runQueue('output/shared-registry', {
+  concurrency: 4, timeoutMs: 120000,
+  resourceBudget: { workers: 4, cpuThreads: 4 },
+  idleMs: 1000 // Keep discovering arrivals until the registry is idle this long.
+});
 ```
 
-The worker contract is ordinary trusted JavaScript:
+The low-level queue defaults to ordinary trusted JavaScript. For an official
+multi-agent study, use the campaign module described below.
 
 ```js
 export default async function run(configuration, context) {
-  // context: key, deterministic seed, attemptId, outputDirectory, writeArtifact
+  // Also reportProgress(json), heartbeat(), and previousAttempts.
   const result = await yourStrategyOrTraining(configuration, context.seed);
   context.writeArtifact('model.json', result.model);
   return result.summary; // finite, acyclic JSON; decimal strings for exact money
@@ -138,13 +152,172 @@ the full report is also retained as the verified result, independently of any
 Workers pin their entrypoint, declared dependencies, toolkit source/build hashes,
 Node version and platform. Declare helper modules and datasets outside `src` as
 dependencies; arbitrary transitive imports cannot be inferred reliably. The
-runner checks before and after work and rejects drift. Do not edit shared modules
-mid-campaign; use a separate checkout/version to develop the next engine.
+low-level unfrozen runner checks before and after work and rejects drift. Frozen
+workers instead execute their verified snapshots. Develop the next engine in a
+separate checkout; running workers keep their admitted toolkit version.
 Runtime/provenance hashes are integrity checks, not signatures or a malicious-code
 sandbox. A trusted callback can still access files, the network or hidden data.
 Timeouts bound waiting on inherited output pipes. Windows termination of descendants
 that outlive an already-exited worker is best effort; worker code should own and
 clean up any subprocesses it launches.
+
+## Official campaigns
+
+`createCampaign(root, specification)` is the module for coordinating independent
+research agents. Its interface exposes `submit(job)`, `seal()`, `run(options)` and
+`report()`, plus read-only `root`, `registryRoot` and `spec`. Reopening the same root
+with the same specification is idempotent. Creation and inspection require no
+compiled build; submissions require a verified runtime and installed packages.
+The immutable event journal stores each admission once and reconstructs membership
+on reopening. Concurrent submissions and sealing share one atomic publication
+seam, with no leases or ownership stealing.
+
+```js
+import { resolve } from 'node:path';
+import { createCampaign, releaseCampaignFinal } from './src/index.mjs';
+
+const campaign = createCampaign('output/study-v1', {
+  id: 'study-v1',
+  datasetHash: preflight.datasetHash,
+  planHash: preflight.planHash,
+  comparisonHash: preflight.comparisonHash,
+  protocol: preflight.protocol,
+  maxTrials: 100,
+  resourceBudget: { workers: 4, cpuThreads: 8, memoryMiB: 4096 },
+  finalAuthorityDirectory: resolve('output/shared-final-authority')
+});
+campaign.submit({
+  key: 'agent-a/ridge-alpha-1',
+  workerModule: './experiments/agent-a/worker.mjs',
+  dependencies: ['./experiments/agent-a/helpers.mjs'],
+  configuration: { data: { file: resolve('datasets/validation.json') }, alpha: 1 },
+  inputFiles: { '/data/file': resolve('datasets/validation.json') },
+  resources: { cpuThreads: 2, memoryMiB: 1024 },
+  seed: 41
+});
+campaign.seal(); // Close the search population; accepted trials still run.
+const report = await campaign.run({
+  concurrency: 4, timeoutMs: 120000,
+  admissionRoot: resolve('output/shared-admission'),
+  maxLogBytes: 1024 * 1024,
+  maxArtifactBytes: 256 * 1024 * 1024,
+  maxResultBytes: 8 * 1024 * 1024
+});
+const final = await releaseCampaignFinal(campaign, { samples, plan },
+  (evaluation, { result, selection, readArtifact }) =>
+    evaluateFrozenWinner(evaluation, result, selection, readArtifact));
+```
+
+Obtain `preflight` from `evaluateStudy` using the intended data, split plan,
+protocol, baseline signals and execution assumptions. Its `comparisonHash` fixes
+those comparisons before trials begin. A worker returns a complete validation
+study directly or as `{ study, ...otherResults }`. The campaign supplies reserved
+`configuration.campaign` metadata; callers cannot replace it. Every accepted key
+counts against `maxTrials`, including failed, cancelled and abandoned work.
+Identity collisions reject changes to configuration, seeds or frozen content;
+use a new key for a changed trial. No caller supplies a replacement population.
+
+`report()` includes all registered trials and their attempt histories. Official
+selection remains `null` until the population is sealed and every admission has
+registered and reached a terminal state. Completed results and supplementary
+artifacts are verified, data/plan/protocol/comparison identities must match, and
+selection uses `selectStudy`'s exact aggregate validation return and lexical tie
+break. Completion publishes an immutable report; later recovery or artifact
+mutation cannot silently replace its outcome. If a process exits after publishing
+an experiment manifest but before binding admission, reopening recovers the
+matching manifest without rereading the mutable checkout.
+
+Campaign submissions always freeze the verified toolkit, installed locked package
+contents, worker and declared helpers. Helpers must remain inside `sourceRoot`
+(the toolkit checkout by default). External files use `inputFiles`: an explicit
+JSON pointer must identify the matching string path in configuration. Only those
+fields are rewritten to immutable copies; unrelated strings are preserved.
+Dataset copies are reused by content identity across bundles in one registry.
+Changes to original worker/helper/input files do not change queued execution.
+Preserve the bundle and input stores with the registry; path descriptors alone
+are not portable archives.
+
+`workerIsolation: 'filesystem'` is the default. Node permissions allow reads of
+the bundle, declared input snapshots and the worker's own job history, and writes
+to its own attempt and claim directory. Undeclared final files remain unreadable.
+Child processes, native addons and worker threads are unavailable in this mode.
+Use a separately specified `workerIsolation: 'trusted'` campaign for Python or
+other foreign training; its frozen provenance remains checked but its callbacks
+have ordinary filesystem and process access. This restriction reduces accidental
+filesystem access and is not a hostile-code or network sandbox. Never declare
+final data as exploration input; files inside the final authority are rejected.
+Permissions cannot detect final observations intentionally embedded in ordinary
+configuration or declared input files. The trusted coordinator must prepare
+train/validation-only payloads or fold artifacts. `evaluateStudy({ samples, plan, ... }, prepare)`
+admits the supplied full sample collection and remains cooperative; giving a
+worker full samples also gives it direct access to those rows despite role-gated
+fold helpers. Keep sensitive final values with the coordinator.
+
+`finalAuthorityDirectory` defaults to `.final-authority` beside the campaign
+root. Campaigns in different parent directories or checkouts must explicitly
+share the same authority directory. It cannot be the campaign root or live
+inside the exploration registry. `releaseCampaignFinal` reopens the persistent
+official report, verifies the winner and its artifact inventory, and derives the
+claim from the dataset and actual final rows. Renaming a campaign or changing
+training folds cannot grant another release of those rows at the same authority.
+The trusted parent supplies final samples only to this callback; callback failure
+or a crash still consumes the claim. The directory is a cooperative authority;
+choosing a separate directory or directly reading data as a trusted caller remains
+outside the contract.
+
+## Operations, recovery and profiling
+
+`queueStatus(registry, { admissionRoot })` reports live supervisors, durable
+reservations and admitted worker/thread/memory totals. Each worker can call
+`context.reportProgress(json)` or `context.heartbeat()`; the latest telemetry
+includes a timestamp, PID and actual RSS. Progress must fit in 64 KiB and is
+operational telemetry, not immutable research evidence.
+
+Thread and memory declarations are admission estimates. The runner sets common
+BLAS/OpenMP thread variables and bounds V8 old-space for declared memory. Native
+allocations, child processes and total RSS are not OS quotas. Budget headroom for
+supervisors, submitters, the controller and dataset/model preparation separately.
+`maxLogBytes`, `maxArtifactBytes` and `maxResultBytes` default to unbounded;
+configure them for demanding campaigns. Limit violations are recorded failures.
+Artifact limits are checked on writes and by polling, so direct file writes can
+temporarily overshoot; these limits do not reserve disk space.
+
+`cancelExperiment` records queued or running cancellation in the population.
+An abort signal stops new admissions; `shutdown: 'drain'` finishes owned workers,
+while `'cancel'` cancels them. Other runners' workers remain owned by those
+runners. Dynamic submissions are discovered while work remains, and `idleMs`
+keeps a drained runner listening for the declared idle period.
+
+After a supervisor interruption, verify that the recorded supervisor and worker
+PIDs are dead. Call `recoverQueue(registry, { admissionRoot })` for the shared
+admission directory, then `recoverExperiment(registry, key)` for unfinished jobs.
+Admission recovery releases dead reservations; it does not rerun work, and job
+recovery does not release reservations in an external admission directory.
+Experiment recovery preserves abandoned history and authorizes a new generation.
+Live owners and ambiguous PID reuse block recovery. Failed or completed jobs do
+not automatically retry. Seal only when the accepted population and intended
+recovery decisions are fixed.
+
+`evaluateStudy` can reuse complete validation folds through
+`resume: { directory, preparationHash, previousDirectories }`. The preparation
+hash must attest to callback/import contents, strategy/model configuration,
+execution data/configuration and seeds; it cannot be derived from arbitrary
+closures. Runtime, data, folds and protocol are independently pinned. Reused
+folds verify their reports, metrics and referenced disk audits. Previous cache
+directories are read-only; verified folds are copied to the current attempt's
+writable directory. Preserve referenced audits. Use `context.previousAttempts`
+to locate prior attempt outputs explicitly. This restores completed fold work,
+not callback/model/RNG state or a partially completed fold.
+
+Run `node --test tests/e2e/swarm.test.mjs` after building to exercise 34 short
+synthetic trial jobs with independent submitters/runners, bounded shared
+admission, dynamic arrivals, cancellation, failure, killed-owner recovery,
+frozen edits, denied final reads and authoritative single-use final release.
+It prints `SWARM_PROFILE` with elapsed time, journal size, sampled process RSS
+and host used memory. Set `SWARM_PROFILE_PATH` to retain the JSON. RSS samples
+are observations rather than OS peak measurements; host memory includes unrelated
+processes. This acceptance scenario does not establish large-dataset training
+capacity. Profile representative data and models before raising campaign budgets.
 
 ## Rules and prediction-to-order execution
 
