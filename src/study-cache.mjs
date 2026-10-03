@@ -1,8 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { deserialize, serialize } from 'node:v8';
-import { canonical, freeze, hash, requireThat } from './core.mjs';
-import { openReplayAudit } from './recording.mjs';
+import { canonical, hash, requireThat } from './core.mjs';
 import { publishImmutable } from './immutable-files.mjs';
 
 function read(path) {
@@ -18,21 +17,6 @@ function read(path) {
 function publish(path, body) {
   publishImmutable(path, canonical({ ...body, checksum: hash(body) }));
   return read(path);
-}
-
-function verifyAudits(value) {
-  const results = [value.fold.candidate, ...Object.values(value.fold.baselines)];
-  requireThat(results.every(result => result?.report), 'STUDY_CACHE_CORRUPT', 'Every completed fold variant must have a report');
-  for (const result of results) {
-    if (!result.report.audit) continue;
-    try {
-      const audit = openReplayAudit(result.report);
-      try { for (const stream of Object.keys(audit.manifest.streams)) for (const row of audit.records(stream)) void row; }
-      finally { audit.close(); }
-    } catch (error) {
-      throw Object.assign(new Error('Completed fold audit is missing or changed', { cause: error }), { code: 'STUDY_CACHE_AUDIT' });
-    }
-  }
 }
 
 // Internal persistence seam. evaluateStudy remains the caller/test interface.
@@ -65,20 +49,17 @@ function openCacheDirectory(directory, identity, foldIds, readOnly) {
     let value;
     try { value = deserialize(Buffer.from(record.value, 'base64')); }
     catch (error) { throw Object.assign(new Error('Completed fold payload cannot be decoded', { cause: error }), { code: 'STUDY_CACHE_CORRUPT' }); }
-    requireThat(value?.fold && value.fold.id === expected.id && value.fold.foldHash === expected.foldHash && value.fold.trainingHash === expected.trainingHash && value.fold.evaluationHash === expected.evaluationHash
-      && value.fold.startTime === expected.startTime && value.fold.endTime === expected.endTime && value.fold.candidate?.report && value.fold.baselines && value.route && Array.isArray(value.baselineNames),
-    'STUDY_CACHE_CORRUPT', 'Completed fold payload has invalid identity or structure');
-    verifyAudits(value);
-    return freeze(value);
+    // A decoded null/false is still a stored payload, never a missing fold.
+    return { value };
   };
   return {
     load,
     save(expected, value) {
       if (readOnly) return;
-      inspect(); verifyAudits(value);
+      inspect();
       const body = { format: 'completed-validation-fold-v1', identityHash, foldHash: hash(expected), value: serialize(value).toString('base64') };
       publish(join(directory, `${hash(expected.id)}.json`), body);
-      requireThat(hash(load(expected)) === hash(value), 'STUDY_CACHE_COLLISION', 'A completed fold already has a different immutable result');
+      requireThat(hash(load(expected).value) === hash(value), 'STUDY_CACHE_COLLISION', 'A completed fold already has a different immutable result');
     },
   };
 }

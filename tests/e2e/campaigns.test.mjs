@@ -71,11 +71,19 @@ test('campaign selection owns the sealed complete population, failures, ties and
 });
 
 test('campaign validates admissions before consuming search budget and withholds queued population selection', async t => {
-  const { campaign, job, directory } = await fixture(t, { maxTrials: 1, resourceBudget: { workers: 1, cpuThreads: 2, memoryMiB: 128 } });
+  const { campaign, job, directory, spec } = await fixture(t, { maxTrials: 1, resourceBudget: { workers: 1, cpuThreads: 2, memoryMiB: 128 } });
   assert.throws(() => campaign.submit(job('invalid')), { code: 'CAMPAIGN_RESOURCES' });
   assert.throws(() => campaign.submit({ ...job('invalid'), resources: { cpuThreads: 3, memoryMiB: 128 } }), { code: 'CAMPAIGN_RESOURCES' });
   const outside = join(directory, 'outside-helper.mjs'); writeFileSync(outside, 'export const value = 1;\n');
   assert.throws(() => campaign.submit({ ...job('invalid-helper'), resources: { cpuThreads: 1, memoryMiB: 128 }, dependencies: [outside] }), { code: 'BUNDLE_PATH' });
+  const input = join(directory, 'input.json'); writeFileSync(input, 'validation');
+  const inputJob = { ...job('invalid-input', { file: input }), resources: { memoryMiB: 128 } };
+  assert.throws(() => campaign.submit({ ...inputJob, inputFiles: { '/missing': input } }), { code: 'BUNDLE_INPUT' });
+  assert.throws(() => campaign.submit({ ...inputJob, inputFiles: { 'file': input } }), { code: 'BUNDLE_INPUT' });
+  assert.throws(() => campaign.submit({ ...inputJob, inputFiles: { '/file': outside } }), { code: 'BUNDLE_INPUT' });
+  const reservedMetadata = createCampaign(join(directory, 'reserved-metadata-campaign'), { ...spec, id: input });
+  assert.throws(() => reservedMetadata.submit({ ...inputJob, inputFiles: { '/campaign/id': input } }), { code: 'CAMPAIGN_INPUT' });
+  assert.equal(reservedMetadata.report().population.length, 0);
   assert.equal(campaign.report().population.length, 0);
   campaign.submit({ ...job('accepted'), resources: { cpuThreads: 2, memoryMiB: 128 } });
   assert.throws(() => campaign.submit({ ...job('over-budget'), resources: { memoryMiB: 64 } }), { code: 'CAMPAIGN_BUDGET' });
@@ -144,6 +152,28 @@ test('a supervisor interruption after manifest publication resumes admission wit
   reopened.seal();
   writeFileSync(workerModule, original);
   assert.equal((await reopened.run({ timeoutMs: 30000 })).selection.selectedId, 'interrupted');
+});
+
+test('campaign registration keeps admitted bytes when original sources change during reservation', async t => {
+  const { campaign, directory, root, spec, job } = await fixture(t);
+  const input = join(directory, 'input.json'), payload = join(directory, 'during-reservation.json');
+  writeFileSync(input, 'original validation input');
+  writeFileSync(payload, JSON.stringify({ root, spec, input, job: { ...job('frozen', { file: input }), inputFiles: { '/file': input } } }));
+  const code = `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+    const payload=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+    const original=fs.linkSync; fs.linkSync=(source,target)=>{ original(source,target);
+      if(target.includes('membership') && JSON.parse(fs.readFileSync(target,'utf8')).event.type==='reserve') {
+        fs.writeFileSync(payload.job.workerModule,'throw new Error("source changed after admission");');
+        fs.writeFileSync(payload.input,'changed input');
+      }
+    }; syncBuiltinESMExports();
+    const {createCampaign}=await import(${JSON.stringify(new URL('../../src/campaigns.mjs', import.meta.url).href)});
+    console.log(JSON.stringify(createCampaign(payload.root,payload.spec).submit(payload.job)));`;
+  const manifest = await child(code, [payload]);
+  assert.equal(manifest.configuration.file, manifest.bundle.inputFiles['/file'].path);
+  assert.equal(readFileSync(manifest.configuration.file, 'utf8'), 'original validation input');
+  campaign.seal();
+  assert.equal((await campaign.run({ timeoutMs: 30000 })).selection.selectedId, 'frozen');
 });
 
 test('completed studies must match every frozen campaign identity', async t => {

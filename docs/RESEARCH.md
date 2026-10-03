@@ -234,6 +234,10 @@ JSON pointer must identify the matching string path in configuration. Only those
 fields are rewritten to immutable copies; unrelated strings are preserved.
 Dataset copies are reused by content identity across bundles in one registry.
 Changes to original worker/helper/input files do not change queued execution.
+Experiment admission owns input interpretation and the agreement between frozen
+configuration, worker and dependencies. Campaigns reserve search budget only
+after that admission succeeds; registration rechecks the captured evidence.
+Callers enqueue source requests rather than supplying detached bundle descriptors.
 Preserve the bundle and input stores with the registry; path descriptors alone
 are not portable archives.
 
@@ -463,6 +467,12 @@ snapshot, including across asynchronous preparation; mutating the caller's rows
 or plan cannot change a running study. Standalone `foldRows` continues to verify
 its inputs on every call. Samples and split indices still occupy memory: this
 removes repeated admission work, not the need to bound the training population.
+
+Fresh and reused completed folds pass the same Study admission before persistence
+or aggregation: fold identity, baseline population, execution identity, replay
+audits and metrics must agree. Fresh execution identities come from each actual
+venue. The internal cache handles immutable storage and content collisions;
+decoding a stored fold does not admit its research evidence.
 
 The protocol is explicit:
 
