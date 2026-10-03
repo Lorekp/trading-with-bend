@@ -85,6 +85,54 @@ Reports include dataset/config/source hashes, toolchain, runtime, strategy and p
 
 `runExperiment` registers an immutable manifest and owned attempt before executing work, then publishes its result and artifact inventory or failure through the same registry as queued workers. An interrupted run remains `running` until explicit recovery checks that its owner has exited and marks it `abandoned`. Inline callbacks cannot be restored; repeating one requires a new trial. CLI trials save raw-input hashes, full configuration and dataset hashes as immutable artifacts as soon as available. Every CLI run uses it; direct low-level API calls must be wrapped explicitly. The registry cannot attest to experiments conducted outside it or reconstruct arbitrary inline closure state.
 
+## Local swarm orchestration
+
+The campaign module fixes dataset, split-plan, protocol and comparison hashes,
+search/resource budgets, worker isolation and final authority location. Its
+append-only membership events linearize admissions against sealing. Selection
+requires the sealed complete terminal population, verifies result/artifact hashes
+and keeps failures, cancellations and abandoned attempt history. The official
+completed report is immutable. These are filesystem and integration-tested
+properties, not Bend or Lean theorems.
+
+Campaign workers execute frozen copies of the verified toolkit, installed locked
+packages, declared helpers and explicitly mapped input files. Filesystem mode
+uses Node permissions to limit reads to the bundle, declared inputs and own job,
+and writes to own claims/attempt. Trusted mode permits foreign/Python training
+with ordinary filesystem/process access. Neither mode is a hostile-code or
+network sandbox; arbitrary imports outside the bundle are not automatically
+discovered. Snapshot hashes are integrity checks, not cryptographic signatures.
+Filesystem permissions cannot detect final rows embedded in configuration or
+intentionally declared inputs. The trusted coordinator must supply exploration
+payloads containing train/validation data only. `evaluateStudy` admits its full
+supplied sample collection; calling it inside a worker with full samples remains
+a cooperative data-role contract rather than concealment of final observations.
+
+Resource admission is shared only through a common local `admissionRoot` with an
+identical budget. CPU threads and memory are declarations; V8 old-space limits
+and thread environment variables do not impose OS RSS/CPU quotas. Submitters,
+supervisors, native allocations and foreign descendants require separate host
+headroom. Output limits detect log/result/artifact excess but do not reserve disk
+or prevent every transient overshoot. Dead ownership is recovered explicitly;
+elapsed time never authorizes stealing a live claim. Multi-host execution is not
+supported.
+
+`releaseCampaignFinal` derives final partition identity from the recorded dataset
+and final rows and fixes the winner's verified result and artifact hashes. Shared
+campaigns must use one canonical `finalAuthorityDirectory`; its default is a
+shared sibling of campaign roots. Failed or crashed final callbacks consume the
+claim. Renaming trials, campaigns or training folds cannot bypass that same
+authority. Trusted callers can still choose another authority or read external
+files directly, which is outside this cooperative contract. Exploration inputs
+must never contain final data.
+
+Optional validation-fold reuse pins runtime/data/folds/protocol and the caller's
+attestation of preparation contents and seeds, verifies completed fold evidence
+and preserves referenced audits. It does not restore arbitrary callback/model/RNG
+state or partially computed folds. Only supplied, verified previous directories
+are used. See [RESEARCH.md](RESEARCH.md) for the operational interface and the
+profiled local swarm acceptance scenario.
+
 ## Shared policy additions
 
 `bend/Policy.bend` is used directly by the strategy and ML adapters. Its laws require:

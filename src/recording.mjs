@@ -1,10 +1,11 @@
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, copyFileSync, linkSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve, toNamespacedPath } from 'node:path';
 import { serialize, deserialize } from 'node:v8';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { CanonicalArrayHash, canonical, freeze, hash, immutableCopy, requireThat } from './core.mjs';
+import { publishImmutable } from './immutable-files.mjs';
 
 const require = createRequire(import.meta.url);
 const fileHash = path => {
@@ -20,11 +21,8 @@ const decodeChunk = row => {
   return values;
 };
 const publishManifest = (path, body) => {
-  // A failed write/fsync must never leave a completed manifest discoverable.
-  const temporary = `${path}.${randomUUID()}.pending`;
-  writeFileSync(temporary, JSON.stringify(body, null, 2), { flag: 'wx', flush: true });
-  linkSync(temporary, path); // Atomic, exclusive publication on the same filesystem.
-  try { unlinkSync(temporary); } catch {} // Publication already succeeded; an orphan is harmless.
+  // Synchronized bytes become visible only after exclusive atomic publication.
+  requireThat(publishImmutable(path, JSON.stringify(body, null, 2)), 'EEXIST', 'Audit manifest is already owned');
 };
 
 /** Private storage seam: the reference uses memory; large runs use indexed disk.
