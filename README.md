@@ -27,7 +27,7 @@ npm run backtest -- examples/demo.json --out output/my-report.json
 
 `demo` builds, checks the Bend laws, runs the synthetic example and writes a unique file under `output/reports/` (its path is printed). It starts with 100000 EUR cents, buys two lots through partial fills, sells them through partial fills, and finishes at 100260 cents after 40 cents of fees. The example also fills an order while its cancellation request is in transit. Explicit `--out` paths are exclusive: an existing report is never overwritten.
 
-For a fresh Windows checkout, install Node 22.13.0 or newer and Git and provide an existing Ubuntu-24.04 WSL distribution, then run:
+For a fresh Windows checkout, install Node 22.16.0 or newer in the 22.x line, or Node 24+, and Git and provide an existing Ubuntu-24.04 WSL distribution, then run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
@@ -35,7 +35,7 @@ powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
 
 The setup script installs locked npm dependencies with `npm ci`, then downloads the pinned Bend revision and a checksum-checked Bun 1.3.10 binary into `.tools`. It does not install global packages or create a WSL distribution. Compilation uses WSL because this Bend revision's import loader assumes POSIX paths; Node runs the emitted JavaScript on Windows. Linux x86-64: run `bash scripts/setup.sh` with Node, Git, curl and unzip installed. On other supported Bend platforms, run `npm ci`, install Bun and clone the exact revision in `toolchain.json` into `.tools/bend` before `npm run build`. `BEND_BIN` can select an external compiler; reports then explicitly mark its revision as unverified.
 
-The minimum Node version supports built-in `node:sqlite` without an enabling flag; Node 22 still marks that module experimental. See the [Node SQLite documentation](https://nodejs.org/download/release/latest-jod/docs/api/sqlite.html). CI checks the minimum Node version and Node 24, including the Lean proof kernel and both test suites.
+The minimum Node version includes the SQLite iterator lifetime fixes in [Node 22.16.0](https://nodejs.org/en/blog/release/v22.16.0/). Earlier Node 22 versions and Node 23 can finalize statements during long reads and are unsupported. Node 22 still marks `node:sqlite` experimental. CI checks the minimum supported Node version and Node 24, including the Lean proof kernel and both test suites.
 
 To use another installed WSL distribution, set `$env:BEND_WSL_DISTRO = 'Debian'` before setup, build or test commands. The default is `Ubuntu-24.04`.
 
