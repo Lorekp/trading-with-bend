@@ -5,6 +5,8 @@ export { runStrategy } from './replay.mjs';
 export { InformationSource, quoteInformationSource, barInformationSource } from './information-source.mjs';
 export { QuoteExecutionVenue } from './execution-venue.mjs';
 export { BarExecutionVenue } from './bar-execution-venue.mjs';
+export { DerivativeExecutionVenue } from './derivative-execution-venue.mjs';
+export { validateDerivativeData } from './derivative-data.mjs';
 export { cappedLots, affordableLots, trainingAllowed, modelReady, canReadPartition, barExecutionAllowed } from './policies.mjs';
 export { validateModelArtifact, EvaluationSession } from './research.mjs';
 export { runExperiment, enqueueExperiment, runQueue, listExperiments, recoverExperiment, readExperimentResult, verifyExperimentArtifacts, deterministicSeed } from './experiments.mjs';

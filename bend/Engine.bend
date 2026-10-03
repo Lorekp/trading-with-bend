@@ -1,5 +1,15 @@
 import Base
 
+# Signed derivative collateral is credits minus debits, interpreted by the host.
+# Keep both bounded natural totals; never saturate an insolvent cash balance.
+type DerivativeCash is Data:
+  DerivativeCash{credits: Nat, debits: Nat}
+
+def derivative_post(cash: DerivativeCash, credit: Nat, debit: Nat) -> DerivativeCash:
+  match cash:
+    case DerivativeCash{credits, debits}:
+      DerivativeCash{Nat.add(credits, credit), Nat.add(debits, debit)}
+
 # Exact reference model. Money is quote minor units; quantity is whole lots.
 # This module is pure: validation of JSON, identities and chronology is external.
 type Side is Data:

@@ -9,6 +9,7 @@ test('Bend specification gate rejects deliberate accounting, cap and leakage reg
   const parent = resolve('build'), directory = join(parent, `proof-mutation-${randomUUID()}`);
   mkdirSync(directory);
   const mutations = [
+    ['bend/Engine.bend', 'DerivativeCash{Nat.add(credits, credit), Nat.add(debits, debit)}', 'DerivativeCash{Nat.add(credits, credit), debits}', 'derivative_posting_is_exact'],
     ['bend/Engine.bend', 'Nat.mul(quantity, Nat.add(price, fee))', 'Nat.mul(quantity, price)', 'buy_updates_ledger_exactly'],
     ['bend/Engine.bend', 'Nat.sub(cash, cost(price, lots, fee))', 'Nat.sub(cash, Nat.mul(price, lots))', 'buy_updates_ledger_exactly'],
     ['bend/Policy.bend', 'Nat.min(requested, Nat.min(capital, position))', 'requested', 'capped_lots_respects_all_limits'],

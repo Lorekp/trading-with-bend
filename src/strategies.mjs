@@ -1,4 +1,4 @@
-import { nat, requireThat } from './core.mjs';
+import { integer, nat, requireThat } from './core.mjs';
 import { cappedLots } from './policies.mjs';
 
 const windowSize = (value, name) => requireThat(Number.isSafeInteger(value) && value > 0, 'STRATEGY_PARAMETER', `${name} must be a positive integer`);
@@ -13,14 +13,16 @@ export function targetPosition(target, options = {}) {
   windowSize(warmup, 'warmup');
   if (maxPositionLots !== undefined) nat(maxPositionLots, 'maxPositionLots');
   requireThat(typeof target === 'function' || typeof target === 'string', 'STRATEGY_PARAMETER', 'target must be a canonical lot string or callback');
-  if (typeof target === 'string') nat(target, 'target');
+  if (typeof target === 'string') integer(target, 'target');
   const onTick = context => {
     requireThat(Array.isArray(context?.history), 'STRATEGY_CONTEXT', 'Expected information history');
     if (context.history.length < warmup) return null;
     const requested = typeof target === 'function' ? target(context) : target;
     if (requested === null) return null;
-    nat(requested, 'target');
-    return maxPositionLots === undefined ? requested : cappedLots(requested, maxPositionLots, maxPositionLots);
+    const signed = integer(requested, 'target');
+    if (maxPositionLots === undefined) return requested;
+    const magnitude = cappedLots(String(signed < 0n ? -signed : signed), maxPositionLots, maxPositionLots);
+    return signed < 0n && magnitude !== '0' ? `-${magnitude}` : magnitude;
   };
   return Object.freeze(Object.assign(onTick, { lookback: warmup }));
 }

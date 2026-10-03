@@ -15,6 +15,7 @@
     "experiments": "node src/experiments-cli.mjs",
     "strategies-demo": "node scripts/build.mjs && node examples/strategies.mjs",
     "research-demo": "node scripts/build.mjs && node examples/parallel-research.mjs",
+    "derivatives-demo": "node scripts/build.mjs && node examples/derivatives.mjs",
     "eth-demo": "node scripts/build.mjs && node scripts/eth-campaign.mjs",
     "ml-demo": "node scripts/build.mjs && node examples/eth-forecast.mjs",
     "benchmark": "node scripts/benchmark.mjs"

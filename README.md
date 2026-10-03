@@ -78,6 +78,15 @@ Prices are quote minor units **per whole lot**. `lotSize` describes the underlyi
 
 Quotes are executable model events, not guarantees that a real historical venue would give those fills. Each unique tick allocates its budgets once across all competing orders. Repeating the same ID is ignored; representing the same economic liquidity under different IDs is a dataset error outside the simulator's knowledge.
 
+## Futures and perpetuals
+
+`DerivativeExecutionVenue` supports linear and inverse/coin-margined contracts,
+long/short targets, funding, margin checks, liquidation and dated expiry. It uses
+the existing information/execution interface and experiment registry. Start with
+`npm run derivatives-demo`; see [the derivative model and study guide](docs/DERIVATIVES.md)
+for units, normalized data, validation/final-holdout workflow and model limits.
+The existing ETH bar demo remains a cash-price proxy.
+
 ## Use the API
 
 ```js

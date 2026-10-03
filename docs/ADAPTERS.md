@@ -52,6 +52,8 @@ For same-market research, pass the same dataset explicitly to both adapters.
 Shipped adapters are `InformationSource` for arbitrary market/features data,
 `quoteInformationSource`, `barInformationSource`, `QuoteExecutionVenue` for Bend
 cash quote replay, and `BarExecutionVenue` for the declared cash-price proxy.
+`DerivativeExecutionVenue` adds linear/inverse futures and perpetuals with signed
+positions, funding, margin and expiry; see [DERIVATIVES.md](DERIVATIVES.md).
 An external venue implements the structural interface directly; inheritance from
 the Bend adapters is unnecessary. Reports and accounting from such a venue retain
 that venue's own verification scope.
@@ -91,14 +93,15 @@ observations, and orders contain only normalized working orders (plain `buy` /
 `sell` sides, with no Bend constructors). The venue's report retains full order
 and fill history.
 
-Strategies return a nonnegative canonical target lot string, or explicit `null`
+Strategies return a signed canonical target lot string, or explicit `null`
 to skip reconciliation. `'0'` requests flat exposure. Arrays of submit/cancel
 orders are rejected. `targetPosition`, `buyAndHold`, `movingAverageCrossover` and
 `meanReversion` generate these targets; they accept no fee settings. Optional
 strategy exposure caps are intent limits. The venue independently enforces its
 mandatory `maxPositionLots`, capital, fees, stale-quote policy and order rules.
 An intent is not a guarantee of execution. Built-in strategies remain long/flat;
-this interface does not add short selling to their declared input domain.
+cash venues still reject short targets. `targetPosition` supports signed intent
+with a cap on its absolute magnitude; the derivative venue admits shorts.
 
 Equity always comes from the venue. For example, breakout risk sizing uses that
 equity with information-source volatility; it never values positions using the
@@ -123,10 +126,11 @@ uses its own previous completed volume. It can consume information bars with a
 different cadence. The source's bars never supply execution prices, liquidity or
 terminal marks. Its final venue bar does not accept new orders.
 
-Both shipped venues are cash-only. Funding is explicitly unsupported and margin
+These two venues are cash-only. Funding is explicitly unsupported and margin
 is cash-only without leverage; zero funding is not presented as a perpetual
-simulation. A derivative venue must implement its own funding, margin,
-liquidation and valuation within this interface. The runner does not compute or
+simulation. `DerivativeExecutionVenue` implements funding, margin, liquidation,
+linear/inverse P&L and dated settlement; its assumptions are in [DERIVATIVES.md](DERIVATIVES.md).
+The runner does not compute or
 override economic report fields and does not attach Bend proof claims to foreign
 venue reports.
 
@@ -134,7 +138,7 @@ Reports add `routing.informationSource` and `routing.executionVenue` manifests
 and a signal hash. Built-in manifests separately bind information observations,
 execution data and execution settings. Keep both datasets/configurations as
 experiment dependencies. Source changes and venue changes invalidate different
-provenance fields. `venue.backtest` exposes the built-in engine for audit and
+provenance fields. Cash venues' `venue.backtest` exposes the built-in engine for audit and
 checkpoints; appending to it after completion invalidates the venue report.
 Engine checkpoints capture execution only; strategy/source continuation requires
 its own state or replay.

@@ -38,6 +38,8 @@ test('data, features, parameter grids and registry readers work without a build 
   const { parseQuoteCsv, QUOTE_UNITS } = await load(directory, 'src/data.mjs');
   const { computeFeatures } = await load(directory, 'src/features.mjs');
   const { sequenceSamples } = await load(directory, 'src/sequence-data.mjs');
+  const { validateDerivativeData } = await load(directory, 'src/derivative-data.mjs');
+  assert.equal(typeof validateDerivativeData, 'function');
   const { parameterGrid } = await load(directory, 'src/search.mjs');
   const { enqueueExperiment, listExperiments } = await load(directory, 'src/experiments.mjs');
   const instrument = { symbol: 'TEST', currency: 'EUR', lotSize: '1', priceTick: '1' };

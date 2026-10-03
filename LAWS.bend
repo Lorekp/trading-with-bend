@@ -2,6 +2,22 @@ import Base
 import ./bend/Engine.bend as E
 import ./bend/Policy.bend as P
 
+# Derivative wallet postings keep independent credit/debit totals: deficits must
+# remain visible rather than disappearing through saturating Nat subtraction.
+law derivative_posting_is_exact:
+  for credits: Nat
+  for debits: Nat
+  for credit: Nat
+  for debit: Nat
+  {E.derivative_post(E.DerivativeCash{credits, debits}, credit, debit)
+   == E.DerivativeCash{Nat.add(credits, credit), Nat.add(debits, debit)} : E.DerivativeCash}
+
+law derivative_zero_posting_preserves_cash:
+  for credits: Nat
+  for debits: Nat
+  {E.derivative_post(E.DerivativeCash{credits, debits}, 0n, 0n)
+   == E.DerivativeCash{credits, debits} : E.DerivativeCash}
+
 # Specifications: review changes independently from implementation and proofs.
 # Preconditions are explicit; Nat.sub itself is saturating, not checked.
 law buy_updates_ledger_exactly:
