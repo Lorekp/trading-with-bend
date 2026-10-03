@@ -21,3 +21,5 @@ export { runBarStrategy, validateBars } from './bar-replay.mjs';
 export { createBarStrategy } from './bar-strategies.mjs';
 export { sequenceSamples } from './sequence-data.mjs';
 export { fitForecast, predictForecast, forecastRuntime } from './forecast.mjs';
+export { openMarketSource } from './market-source.mjs';
+export { prepareMarketData, readProcessedData, loadProcessedInformationSource, asOfMarketData } from './market-data.mjs';

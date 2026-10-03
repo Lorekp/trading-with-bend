@@ -205,3 +205,51 @@ Both produced 500 fills and the same compact trace hash
 The 2,000-quote/50-order default benchmark fell from 10.403 s before any changes
 to 0.827 s while preserving its full trace hash. These measure different workloads
 and should not be combined into a single speedup claim.
+
+## Optional local OKX dataset
+
+Binance remains the primary information source. Downloading OKX does not change
+the campaign configuration, strategies, selected execution venue or registry.
+
+The matching OKX dataset is `ETH-USDT-SWAP`, September 2026, under
+`data/okx/swap/ETH-USDT-SWAP/2026-09/`. Its `manifest.json` is the authoritative
+download and verification record. The acquisition includes:
+
+- Daily 400-level-per-side L2 snapshots and updates for all 30 UTC days.
+- Trades and one-minute candle archives, including the adjacent UTC+8 file
+  needed to cover the end of September UTC. Filter records to the requested UTC
+  window rather than treating archive filenames as UTC dates.
+- Paginated one-minute mark/index price series, premium observations and
+  historical funding settlements, with explicit coverage checks.
+- Current instrument specifications and cross-margin position tiers, clearly
+  marked as reference-only rather than historical rules.
+
+```powershell
+node scripts/download-okx.mjs 2026-09
+python scripts/verify-okx-download.py 2026-09
+```
+
+The verifier can run alongside the downloader and processes completed files.
+Archives remain compressed. It checks local SHA-256, archive CRCs, every record's
+timestamp, all candle rows, every L2 snapshot and every 10,000th L2 payload.
+This is not a full-month order-book replay or proof that the vendor omitted no
+updates. L2 archives omit sequence IDs and local receipt timestamps. Raw OKX
+book quantities are contracts; pin the instrument multiplier before conversion.
+
+The manifest becomes complete only after offline verification and UTC coverage
+checks pass. A complete download is not an implemented perpetual execution
+adapter: funding, margin, fees, latency and maker queue assumptions still belong
+to the independently selected ExecutionVenue.
+
+The September premium series has 43,161 observations and 39 empty UTC minute
+buckets. Direct API rechecks of every gap recovered no additional rows; the
+responses are retained in `api/premium-gap-check.json`. These gaps remain
+explicit, so the overall manifest stays incomplete even when all archives are
+downloaded and verified. No premium values are interpolated or substituted
+from Binance. The downloader returns a nonzero status for this partial series.
+
+See [EXECUTION_VENUE_COMPARISON.md](EXECUTION_VENUE_COMPARISON.md) for the one-day
+Bybit/OKX comparison that motivated keeping this alternative dataset locally.
+
+See [MARKET_DATA.md](MARKET_DATA.md) for exact cleanup, canonical schemas,
+streaming processed artifacts and causal as-of reads. Binance remains primary.

@@ -47,3 +47,13 @@ def ready_chain(labels: Nat, +started: Nat, +completed: Nat, +deployed: Nat, dec
 # and the open timestamp. Price/spread/volume assumptions remain host inputs.
 def bar_execution_allowed(available: Nat, open: Nat, +execution: Nat) -> Bool:
   Bool.and(Nat.is_lt(available, execution), Nat.is_lt(open, execution))
+
+# Visibility is inclusive at publication. Execution remains strictly later.
+def data_visible(available: Nat, decision: Nat) -> Bool:
+  Nat.is_le(available, decision)
+
+# Displayed best quotes, not fill budgets or a perpetual accounting model.
+def valid_quote(+bid: Nat, ask: Nat, bid_size: Nat, ask_size: Nat) -> Bool:
+  Bool.and(Nat.is_gt(bid, 0n),
+    Bool.and(Nat.is_lt(bid, ask),
+      Bool.and(Nat.is_gt(bid_size, 0n), Nat.is_gt(ask_size, 0n))))

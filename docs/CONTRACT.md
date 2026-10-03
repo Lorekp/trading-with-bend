@@ -110,3 +110,17 @@ tests, not long campaigns: historical-order scans can exceed the backend stack.
 from each trace sample and therefore intentionally changes the trace hash.
 Comparisons use the same trace mode. Checkpoints record these options and still
 replay all accepted events; they do not capture stateful bar-strategy models.
+
+## Market-data policies
+
+Five additional laws in `LAWS.bend` bring the specification to 32: unpublished
+observations are hidden, published observations are visible, zero bids and
+locked/crossed quotes are rejected, and positive uncrossed quotes with positive
+sizes are accepted. `asOfMarketData` and the OKX book processor call these Bend
+policies directly. Visibility at publication is inclusive; execution timing
+remains a separate, strictly-later policy.
+
+Exact decimal parsing and contract conversion use host BigInt and are tested.
+CRC handling, L2 reconstruction, deduplication, filesystem publication and
+vendor completeness are not covered by these laws. See [MARKET_DATA.md](MARKET_DATA.md)
+for the source assumptions, immutable processed artifacts and gap policy.

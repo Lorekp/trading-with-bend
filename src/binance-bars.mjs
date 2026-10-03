@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { open, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createInflateRaw } from 'node:zlib';
-import { archiveAccepted, checkArchiveBuild } from './archive.mjs';
+import { archiveAccepted, checkArchiveBuild, crcUpdate } from './archive.mjs';
+import { exactDecimal, scaledDecimal, decimalAtMost } from './decimal.mjs';
 import { hash, MAX_NAT, nat, requireThat } from './core.mjs';
 
 const MINUTE = 60_000n;
@@ -10,12 +11,6 @@ const KLINE_HEADER = 'open_time,open,high,low,close,volume,close_time,quote_volu
 const FUNDING_HEADER = 'calc_time,funding_interval_hours,last_funding_rate';
 const AUXILIARY = ['markPriceKlines', 'indexPriceKlines', 'premiumIndexKlines', 'fundingRate'];
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024, MAX_CSV_BYTES = 128 * 1024 * 1024;
-const crcTable = Uint32Array.from({ length: 256 }, (_, n) => {
-  let crc = n;
-  for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
-  return crc >>> 0;
-});
-const crcUpdate = (crc, bytes) => { for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8); return crc >>> 0; };
 const fail = (ok, code, message) => requireThat(ok, code, message);
 
 async function readExactly(handle, position, length) {
@@ -127,24 +122,8 @@ async function consumeArchive(file, manifestDirectory, onLine) {
   } finally { await handle.close(); }
 }
 
-function decimal(value, name, signed = false) {
-  const match = typeof value === 'string' && value.length <= 64 && /^(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?(?:0|[1-9][0-9]*)))?$/.exec(value);
-  fail(match && (signed || match[1] === ''), 'BINANCE_DECIMAL', `${name} must be an exact ${signed ? 'signed' : 'nonnegative'} decimal`);
-  const [, sign, integer, fraction = '', exponentText = '0'] = match, exponent = Number(exponentText);
-  fail(fraction.length <= 18 && Number.isSafeInteger(exponent) && Math.abs(exponent) <= 18, 'BINANCE_DECIMAL', `${name} exceeds the supported decimal precision/exponent`);
-  const power = fraction.length - exponent;
-  // Binance funding archives include literals such as 9.2E-7. The conversion
-  // never passes the coefficient through floating point.
-  return { numerator: BigInt(integer + fraction) * (sign === '-' ? -1n : 1n) * (power < 0 ? 10n ** BigInt(-power) : 1n), denominator: power > 0 ? 10n ** BigInt(power) : 1n };
-}
-function scaled(value, scale, name, signed = false) {
-  const number = decimal(value, name, signed), numerator = number.numerator * scale;
-  fail(numerator % number.denominator === 0n, 'BINANCE_PRECISION', `${name} cannot be represented exactly in the declared units`);
-  const result = numerator / number.denominator;
-  fail(result >= -MAX_NAT && result <= MAX_NAT, 'INTEGER_RANGE', `${name} exceeds supported integer range`);
-  return result;
-}
-const decimalAtMost = (left, right) => left.numerator * right.denominator <= right.numerator * left.denominator;
+const decimal = (value, name, signed = false) => exactDecimal(value, name, { signed, prefix: 'BINANCE' });
+const scaled = (value, scale, name, signed = false) => scaledDecimal(value, scale, name, { signed, prefix: 'BINANCE' });
 
 function kline(fields, type) {
   fail(fields.length === 12, 'BINANCE_CSV', 'Kline rows require exactly 12 fields');

@@ -1,0 +1,10 @@
+{
+  "venue": "okx",
+  "kind": "bookTicker",
+  "manifestPath": "data/okx/swap/ETH-USDT-SWAP/2026-09/manifest.json",
+  "startTime": "1789430400000",
+  "endTime": "1789430700000",
+  "publicationDelayMs": "0",
+  "contractSizeETH": "0.1",
+  "outputDirectory": "data/processed/okx/ETH-USDT/2026-09/bookTicker-first-5m-sep15"
+}

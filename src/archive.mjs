@@ -2,6 +2,13 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { bendRuntime } from './bend-runtime.mjs';
 
+const crcTable = Uint32Array.from({ length: 256 }, (_, n) => {
+  let crc = n;
+  for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  return crc >>> 0;
+});
+export const crcUpdate = (crc, bytes) => { for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8); return crc >>> 0; };
+
 export { verifyBendRuntime as checkArchiveBuild } from './bend-runtime.mjs';
 
 export function parseChecksum(text, filename) {

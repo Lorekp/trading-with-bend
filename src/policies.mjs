@@ -26,3 +26,10 @@ export function modelReady({ labelAvailableAt, trainingStartedAt, trainingComple
 export function barExecutionAllowed({ availableAt, openTime, executionTime }) {
   return bendRuntime().policy.bar_execution_allowed(nat(availableAt, 'availableAt'), nat(openTime, 'openTime'), nat(executionTime, 'executionTime'));
 }
+
+export function dataVisible(availableAt, decisionTime) {
+  return bendRuntime().policy.data_visible(nat(availableAt, 'availableAt'), nat(decisionTime, 'decisionTime'));
+}
+export function validQuote({ bid, ask, bidSizeLots, askSizeLots }) {
+  return bendRuntime().policy.valid_quote(nat(bid, 'bid'), nat(ask, 'ask'), nat(bidSizeLots, 'bidSizeLots'), nat(askSizeLots, 'askSizeLots'));
+}

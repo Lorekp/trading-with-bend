@@ -3,7 +3,9 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node scripts/build.mjs && node scripts/test-e2e.mjs",
@@ -12,6 +14,7 @@
     "proof": "node scripts/build.mjs --verdict",
     "demo": "node scripts/build.mjs && node src/cli.mjs examples/demo.json",
     "backtest": "node src/cli.mjs",
+    "data:process": "node scripts/process-market-data.mjs",
     "experiments": "node src/experiments-cli.mjs",
     "strategies-demo": "node scripts/build.mjs && node examples/strategies.mjs",
     "research-demo": "node scripts/build.mjs && node examples/parallel-research.mjs",
@@ -19,5 +22,9 @@
     "eth-demo": "node scripts/build.mjs && node scripts/eth-campaign.mjs",
     "ml-demo": "node scripts/build.mjs && node examples/eth-forecast.mjs",
     "benchmark": "node scripts/benchmark.mjs"
+  },
+  "dependencies": {
+    "tar-stream": "3.2.2",
+    "yauzl": "3.4.0"
   }
 }

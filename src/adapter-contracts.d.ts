@@ -75,3 +75,26 @@ export type Strategy<Data = Record<string, unknown>> = ((context: StrategyContex
   /** Default and minimum visible history; use replay lookback: 'all' for full history. */
   readonly lookback?: number;
 };
+
+/** Data preparation does not construct or select an ExecutionVenue. */
+export type MarketDataKind = 'bars' | 'bookTicker' | 'trades' | 'markPrice' | 'indexPrice' | 'premium' | 'funding';
+export interface MarketDataConfiguration {
+  venue: 'binance' | 'okx';
+  kind: MarketDataKind;
+  manifestPath: string;
+  startTime: Decimal;
+  endTime: Decimal;
+  publicationDelayMs?: Decimal;
+  /** Exact decimal ETH per contract; explicitly pinned for OKX trades/books. */
+  contractSizeETH?: string;
+}
+export interface MarketDataSource {
+  readonly manifest: Readonly<Record<string, unknown>>;
+  records(): AsyncIterable<Observation>;
+}
+export interface ProcessedDataSelection {
+  manifestPath: string;
+  startTime?: Decimal;
+  endTime?: Decimal;
+  allowGaps?: boolean;
+}

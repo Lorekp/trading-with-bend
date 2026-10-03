@@ -1,0 +1,9 @@
+{
+  "venue": "binance",
+  "kind": "bars",
+  "manifestPath": "data/binance/um/ETHUSDT/2026-09/manifest.json",
+  "startTime": "1788220800000",
+  "endTime": "1790812800000",
+  "publicationDelayMs": "0",
+  "outputDirectory": "data/processed/binance/ETH-USDT/2026-09/bars"
+}

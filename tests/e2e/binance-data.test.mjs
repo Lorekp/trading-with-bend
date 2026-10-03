@@ -1,11 +1,16 @@
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deflateRawSync } from 'node:zlib';
+import { deflateRawSync, gzipSync } from 'node:zlib';
+import tar from 'tar-stream';
+import { openMarketSource } from '../../src/market-source.mjs';
+import { prepareMarketData, readProcessedData, loadProcessedInformationSource, asOfMarketData } from '../../src/market-data.mjs';
+import { mkdirSync } from 'node:fs';
 import { loadBinanceBars, loadBinanceSeries } from '../../src/binance-bars.mjs';
 import { downloadHyperliquid, monthWindow, candleCoverage, validateFunding } from '../../scripts/download-hyperliquid.mjs';
 
@@ -253,4 +258,168 @@ test('Hyperliquid coverage rejects wrong markets, duplicates and malformed bars 
   assert.throws(() => candleCoverage([{ ...candle, h: '1' }], window), /OHLCV/);
   const coverage = validateFunding([{ coin: 'ETH', time: 0, fundingRate: '1e-5', premium: '-1e-5' }], { coin: 'ETH', startTime: 0, endTimeExclusive: 7_200_000 });
   assert.equal(coverage.status, 'partial'); assert.deepEqual(coverage.missingHours, [3_600_000]);
+});
+
+const OKX_HEADER = 'instrument_name,open,high,low,close,vol,vol_ccy,vol_quote,open_time,confirm';
+const okxBar = (index, changes = {}) => {
+  const values = row(index, changes).split(',');
+  return ['ETH-USDT-SWAP', ...values.slice(1, 5), '1', values[5], values[7], values[0], '1'].join(',');
+};
+const collect = async stream => { const values = []; for await (const value of stream) values.push(value); return values; };
+async function okxFixture(t, kind, content, { corruptCrc = false } = {}) {
+  const parent = mkdtempSync(join(tmpdir(), 'bend-market-e2e-')), raw = join(parent, 'raw'); mkdirSync(raw);
+  t.after(() => { assert.equal(dirname(parent), resolve(tmpdir())); assert.ok(basename(parent).startsWith('bend-market-e2e-')); rmSync(parent, { recursive: true, force: true }); });
+  let bytes, filename;
+  if (kind === 'bookTicker') {
+    const pack = tar.pack(); pack.entry({ name: 'book.data' }, content); pack.finalize();
+    bytes = gzipSync(Buffer.concat(await collect(pack))); filename = 'book.tar.gz';
+  } else if (kind === 'premium') { bytes = Buffer.from(JSON.stringify(content)); filename = 'premium.json'; }
+  else {
+    bytes = makeZip(content, { name: 'ETH-USDT-SWAP.csv' }); filename = 'market.zip';
+    if (corruptCrc) { bytes.writeUInt32LE(0, 14); bytes.writeUInt32LE(0, bytes.readUInt32LE(bytes.length - 6) + 16); }
+  }
+  writeFileSync(join(raw, filename), bytes);
+  const type = { bars: 'candles1m', trades: 'trades', bookTicker: 'l2Book400', premium: 'premiumHistory' }[kind];
+  const manifestPath = join(raw, 'manifest.json');
+  writeFileSync(manifestPath, JSON.stringify({ schema: 'okx-download-v1', symbol: 'ETH-USDT-SWAP', datasets: [
+    { type, status: 'complete', files: [{ path: filename, bytes: bytes.length, sha256: sha(bytes), status: 'verified' }] },
+  ] }));
+  return { manifestPath, parent, raw, outputDirectory: join(parent, 'processed'), venue: 'okx', kind, startTime: '0', endTime: '120000' };
+}
+const bookRow = (ts, action = 'snapshot', bids = [['2000', '1']], asks = [['2001', '2']]) => JSON.stringify({ instId: 'ETH-USDT-SWAP', action, ts: String(ts), bids, asks });
+
+test('Binance and OKX archives publish the same canonical bars through the same processing interface', async t => {
+  const okx = await okxFixture(t, 'bars', `${OKX_HEADER}\n${okxBar(0)}\n${okxBar(1)}\n`);
+  const binance = fixture(t, csv(2));
+  const left = await prepareMarketData({ source: await openMarketSource(okx), outputDirectory: okx.outputDirectory });
+  const otherOutput = join(okx.parent, 'binance');
+  const right = await prepareMarketData({ source: await openMarketSource({ ...binance, venue: 'binance', kind: 'bars', startTime: '0', endTime: '120000' }), outputDirectory: otherOutput });
+  const options = { manifestPath: join(okx.outputDirectory, 'manifest.json') };
+  assert.deepEqual(await collect(readProcessedData(options)), await collect(readProcessedData({ manifestPath: join(otherOutput, 'manifest.json') })));
+  assert.equal(left.rows, 2); assert.equal(right.rows, 2); assert.equal(left.quality.missingBuckets, 0);
+  assert.deepEqual(await prepareMarketData({ source: await openMarketSource(okx), outputDirectory: okx.outputDirectory }), left);
+  const info = await loadProcessedInformationSource(options);
+  assert.equal([...info.observations()].length, 2); assert.equal(info.setTarget, undefined); assert.equal(info.report, undefined);
+  await assert.rejects(prepareMarketData({ source: await openMarketSource(okx), outputDirectory: join(okx.raw, 'processed') }), code('DATA_OUTPUT'));
+  await assert.rejects(prepareMarketData({ source: await openMarketSource({ ...okx, publicationDelayMs: '1' }), outputDirectory: okx.outputDirectory }), code('DATA_OUTPUT_EXISTS'));
+  const shard = join(okx.outputDirectory, left.files[0].path), bytes = readFileSync(shard); bytes[20] ^= 1; writeFileSync(shard, bytes);
+  await assert.rejects(collect(readProcessedData(options)), code('ARCHIVE_INTEGRITY'));
+});
+
+test('cleanup drops only identical identities, records gaps, and never publishes conflicting or corrupt input', async t => {
+  const duplicate = await okxFixture(t, 'bars', `${OKX_HEADER}\n${okxBar(0)}\n${okxBar(0)}\n${okxBar(1)}\n`);
+  const result = await prepareMarketData({ source: await openMarketSource(duplicate), outputDirectory: duplicate.outputDirectory });
+  assert.equal(result.rows, 2); assert.equal(result.quality.identicalDuplicatesDropped, 1);
+  const missing = await okxFixture(t, 'bars', `${OKX_HEADER}\n${okxBar(0)}\n${okxBar(2)}\n`); missing.endTime = '180000';
+  const gaps = await prepareMarketData({ source: await openMarketSource(missing), outputDirectory: missing.outputDirectory });
+  assert.equal(gaps.quality.missingBuckets, 1); assert.deepEqual(gaps.quality.gapRanges, [{ startTime: '60000', endTime: '120000' }]);
+  const path = join(missing.outputDirectory, 'manifest.json');
+  await assert.rejects(collect(readProcessedData({ manifestPath: path })), code('DATA_GAPS'));
+  assert.equal((await collect(readProcessedData({ manifestPath: path, allowGaps: true }))).length, 2);
+  for (const [text, options, expected] of [
+    [`${OKX_HEADER}\n${okxBar(0)}\n${okxBar(0, { close: '2000.01' })}\n`, {}, 'DATA_DUPLICATE'],
+    [`${OKX_HEADER}\n${okxBar(1)}\n${okxBar(0)}\n`, {}, 'DATA_ORDER'],
+    [`${OKX_HEADER}\n${okxBar(0)}\n`, { corruptCrc: true }, 'ZIP_CRC'],
+  ]) {
+    const input = await okxFixture(t, 'bars', text, options);
+    await assert.rejects(prepareMarketData({ source: await openMarketSource(input), outputDirectory: input.outputDirectory }), code(expected));
+    assert.equal(JSON.parse(readFileSync(join(input.outputDirectory, 'manifest.json'))).status, 'failed');
+    await assert.rejects(collect(readProcessedData({ manifestPath: join(input.outputDirectory, 'manifest.json') })), code('DATA_MANIFEST'));
+  }
+});
+
+test('exact OKX L2 replay resets snapshots, deletes levels, preserves every event and enforces causal as-of visibility', async t => {
+  const input = await okxFixture(t, 'bookTicker', [bookRow(0), bookRow(10, 'update', [['2000', '0'], ['1999', '0.11']], []), bookRow(20, 'snapshot', [['1998', '0.01']], [['1999', '0.02']])].join('\n') + '\n');
+  Object.assign(input, { endTime: '30', contractSizeETH: '0.1', publicationDelayMs: '5' });
+  const result = await prepareMarketData({ source: await openMarketSource(input), outputDirectory: input.outputDirectory });
+  assert.equal(result.rows, 3);
+  const records = await collect(readProcessedData({ manifestPath: join(input.outputDirectory, 'manifest.json') }));
+  assert.deepEqual(records.map(r => [r.data.bid, r.data.bidSizeLots, r.availableAt]), [['2000000', '100', '5'], ['1999000', '11', '15'], ['1998000', '1', '25']]);
+  const aligned = await collect(asOfMarketData(records, ['0', '5', '14', '15', '25', '100'], { maxAgeMs: '20' }));
+  assert.deepEqual(aligned.map(r => r.observation?.time ?? r.reason), ['unavailable', '0', '0', '10', '20', 'stale']);
+  await assert.rejects(collect(asOfMarketData(records, ['20', '10'], { maxAgeMs: '100' })), code('DATA_ORDER'));
+  assert.equal(records[0].data.bidLiquidity, undefined); // Displayed size never becomes a fill budget here.
+});
+
+test('L2 processing fails closed on missing snapshots, crossed quotes and inexact contract conversion', async t => {
+  for (const [line, expected] of [
+    [bookRow(0, 'update'), 'BOOK_SNAPSHOT'],
+    [bookRow(0, 'snapshot', [['2002', '1']]), 'BOOK_QUOTE'],
+    [bookRow(0, 'snapshot', [['2000', '0.001']]), 'DATA_PRECISION'],
+  ]) {
+    const input = await okxFixture(t, 'bookTicker', line + '\n'); input.contractSizeETH = '0.1';
+    await assert.rejects(prepareMarketData({ source: await openMarketSource(input), outputDirectory: input.outputDirectory }), code(expected));
+  }
+});
+
+test('trade identities and signed premium observations retain exact values without synthetic fills or gap filling', async t => {
+  const trades = await okxFixture(t, 'trades', 'instrument_name,trade_id,side,price,size,created_time,source\nETH-USDT-SWAP,1,buy,2000.01,0.02,0,0\nETH-USDT-SWAP,1,buy,2000.01,0.02,0,0\n');
+  trades.contractSizeETH = '0.1';
+  const result = await prepareMarketData({ source: await openMarketSource(trades), outputDirectory: trades.outputDirectory });
+  assert.equal(result.rows, 1); assert.equal(result.quality.identicalDuplicatesDropped, 1);
+  const [trade] = await collect(readProcessedData({ manifestPath: join(trades.outputDirectory, 'manifest.json') }));
+  assert.equal(trade.data.price, '2000010'); assert.equal(trade.data.sizeLots, '2');
+  const premium = await okxFixture(t, 'premium', [{ instId: 'ETH-USDT-SWAP', ts: '18000', premium: '-0.000000000000123456' }]);
+  const processed = await prepareMarketData({ source: await openMarketSource(premium), outputDirectory: premium.outputDirectory });
+  assert.equal(processed.quality.missingBuckets, 1);
+  const [rate] = await collect(readProcessedData({ manifestPath: join(premium.outputDirectory, 'manifest.json'), allowGaps: true }));
+  assert.deepEqual(rate.data.rate, { numerator: '-1929', denominator: '15625000000000000' });
+});
+
+
+test('resumed OKX downloads never replace a saved checksum with changed sample bytes', t => {
+  const root = mkdtempSync(join(tmpdir(), 'okx-resume-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const directory = join(root, 'data/okx/swap/ETH-USDT-SWAP/2020-01');
+  mkdirSync(join(directory, 'l2Book400'), { recursive: true });
+  const original = Buffer.from('original sample'), changed = Buffer.from('modified sample');
+  const file = { filename: 'ETH-USDT-SWAP-fixture.tar.gz', path: 'l2Book400/fixture.tar.gz',
+    status: 'downloaded', sha256: sha(original), bytes: original.length, reusedSample: true };
+  writeFileSync(join(directory, file.path), changed);
+  const manifestPath = join(directory, 'manifest.json');
+  writeFileSync(manifestPath, JSON.stringify({ datasets: [{ type: 'l2Book400', files: [file] }] }));
+  const script = new URL('../../scripts/download-okx.mjs', import.meta.url).href;
+  const stub = `
+    const timeout = globalThis.setTimeout;
+    globalThis.setTimeout = callback => timeout(callback, 0);
+    globalThis.fetch = async url => {
+      if (new URL(url).hostname !== 'www.okx.com') throw new Error('Unexpected archive download');
+      return new Response(JSON.stringify({ code: '0', data: String(url).includes('download-link') ? { details: [] } : [] }));
+    };
+    process.argv = [process.execPath, 'download-okx.mjs', '2020-01'];
+    await import(${JSON.stringify(script)});
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', stub], { cwd: root, encoding: 'utf8', timeout: 10000, windowsHide: true });
+  assert.equal(result.status, 2, result.stderr);
+  const saved = JSON.parse(readFileSync(manifestPath)).datasets.find(dataset => dataset.type === 'l2Book400').files[0];
+  assert.equal(saved.status, 'failed'); assert.match(saved.error, /Archive hash mismatch/);
+  assert.equal(saved.sha256, file.sha256); assert.deepEqual(readFileSync(join(directory, file.path)), changed);
+});
+
+test('cached OKX archive verification rechecks current bytes before accepting its report', t => {
+  const python = spawnSync('python', ['--version'], { encoding: 'utf8', windowsHide: true });
+  if (python.status !== 0) return t.skip('Python is required for the offline verifier');
+  const root = mkdtempSync(join(tmpdir(), 'okx-verifier-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const directory = join(root, 'data/okx/swap/ETH-USDT-SWAP/2020-01');
+  mkdirSync(join(directory, 'validation'), { recursive: true });
+  mkdirSync(join(root, 'scripts'));
+  const script = join(root, 'scripts/verify-okx-download.py');
+  writeFileSync(script, readFileSync(new URL('../../scripts/verify-okx-download.py', import.meta.url)));
+  const original = Buffer.from('original archive'), changed = Buffer.from('modified archive');
+  const file = { path: 'fixture.tar.gz', status: 'verified', sha256: sha(original), bytes: original.length };
+  writeFileSync(join(directory, file.path), original);
+  writeFileSync(join(directory, 'validation/fixture.tar.gz.json'), JSON.stringify({ ...file,
+    records: 1, inWindowRecords: 1, firstTime: 0, lastTime: 0, minuteBuckets: [0], candleTimes: [] }));
+  const manifestPath = join(directory, 'manifest.json');
+  const pending = { complete: false, downloadFinishedAt: '2020-02-01', window: { startTime: 0, endTimeExclusive: 60000 },
+    datasets: [{ type: 'l2Book400', expectedFiles: 1, files: [file] }] };
+  const run = () => spawnSync('python', [script, '2020-01'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
+  writeFileSync(manifestPath, JSON.stringify(pending));
+  const valid = run(); assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(JSON.parse(readFileSync(manifestPath)).complete, true);
+  writeFileSync(manifestPath, JSON.stringify(pending));
+  writeFileSync(join(directory, file.path), changed);
+  const invalid = run(); assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /Hash\/size mismatch/);
+  assert.equal(JSON.parse(readFileSync(manifestPath)).complete, false);
 });

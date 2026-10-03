@@ -208,3 +208,36 @@ def Laws.closed_orders_are_removed(id, side, limit, accepted, filled, cancelled,
 
 def Laws.working_orders_keep_fifo(id, side, limit, accepted, remaining, filled, cancelled, decision, arrival, cancel_at, tail):
   {==}
+
+def Laws.future_market_data_is_hidden(decision, delay):
+  match decision:
+    case 0n:
+      {==}
+    case 1n+p:
+      Laws.future_market_data_is_hidden(p, delay)
+
+def Laws.published_market_data_is_visible(available, delay):
+  match available:
+    case 0n:
+      match delay:
+        case 0n:
+          {==}
+        case 1n+p:
+          {==}
+    case 1n+p:
+      Laws.published_market_data_is_visible(p, delay)
+
+def Laws.zero_bid_is_not_a_quote(ask, bid_size, ask_size):
+  {==}
+
+def Laws.locked_or_crossed_quotes_are_rejected(ask, delay, bid_size, ask_size):
+  %Equal.sym(Bool, Nat.is_lt(Nat.add(ask, delay), ask), False{}, at_or_after_not_lt(ask, delay)) :
+    {Bool.and(Nat.is_gt(Nat.add(ask, delay), 0n), Bool.and(_, Bool.and(Nat.is_gt(bid_size, 0n), Nat.is_gt(ask_size, 0n)))) == False{} : Bool}
+  and_false(Nat.is_gt(Nat.add(ask, delay), 0n))
+
+def Laws.positive_uncrossed_quotes_are_accepted(bid, spread, bid_size, ask_size):
+  match bid:
+    case 0n:
+      {==}
+    case 1n+p:
+      Laws.positive_uncrossed_quotes_are_accepted(p, spread, bid_size, ask_size)
