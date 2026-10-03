@@ -126,11 +126,32 @@ Build evidence is bound to hashes of the Bend sources and generated modules; sta
 Profile the same workload in fresh processes to compare memory and disk recording:
 
 ```powershell
-npm run benchmark -- --ticks 200000 --orders 1000 --lookback 64 --profile
-npm run benchmark -- --ticks 200000 --orders 1000 --lookback 64 --profile --data-directory output/bench-quotes --audit-directory output/bench-audit
+npm run benchmark -- --profile smoke
+npm run benchmark -- --profile pilot
+npm run benchmark -- --baseline C:/bench/base --candidate C:/bench/change --output output/benchmarks/comparison-001
+node scripts/profile-replay.mjs --ticks 200000 --orders 1000 --lookback 64 --profile
 ```
 
-Use fresh directories for each disk run. The benchmark generates its disk input lazily and reports preparation, replay, report/finalization time, process peak RSS and CPU samples. It defaults to a 256-observation lookback, compact trace and active orders; `--lookback all` explicitly measures complete history. Array input and in-memory audit remain available for reference comparisons.
+Build both targets first and give them identical `experiments/speed/` harnesses.
+Without target paths, the benchmark runs an A/A comparison in this checkout.
+It measures fresh-process job completion including complete disk audits and
+durable reports, using randomized serial pairs and verified identical evidence.
+The release profile runs twenty pairs for each of two 200,000-quote cases;
+the five-pair pilot and small smoke profile provide diagnostic results.
+Inputs, raw attempts, phase timings, CPU deltas, lifetime peak RSS and paired
+bootstrap intervals remain under the printed fresh output directory. No profiler
+runs during comparison. `scripts/profile-replay.mjs` is the separate single-run
+diagnostic; use fresh directories for its disk input and audit options.
+
+After a pilot, protocol JSON can freeze a larger `pairs` budget and `timeoutMs`.
+Saved `protocol.json` can be reused with `--protocol` and a fresh output directory;
+`run.json` records each execution's inputs, host and schedule. All three harnesses
+(controller, baseline and candidate) must match. Release conclusions are withheld
+when the recorded order-effect or drift screens require review.
+
+See the [benchmark methodology research](docs/BENCHMARK-RESEARCH.md) and
+[repeated-comparison design](docs/BENCHMARK.md) for the protocol covering
+fresh processes, representative workloads, correctness gates and uncertainty.
 
 For five concurrent tick workers sharing one admitted dataset:
 

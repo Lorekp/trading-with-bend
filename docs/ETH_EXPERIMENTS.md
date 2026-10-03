@@ -149,11 +149,11 @@ instead of silently mixing versions.
 
 ## Performance and checks
 
-`scripts/benchmark.mjs` accepts `--ticks`, `--orders`, `--lookback`, `--trace`,
+`scripts/profile-replay.mjs` accepts `--ticks`, `--orders`, `--lookback`, `--trace`,
 `--order-storage`, and optional `--profile`. For example:
 
 ```powershell
-npm run benchmark -- --ticks 43000 --orders 500 --lookback 64 --trace compact --order-storage active
+node scripts/profile-replay.mjs --ticks 43000 --orders 500 --lookback 64 --trace compact --order-storage active
 ```
 
 Bounded history avoids cloning an ever-growing prefix. Immutable state reuse
