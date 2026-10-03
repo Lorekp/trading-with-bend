@@ -2,6 +2,8 @@ import { freeze, hash, integer, nat, requireThat } from './core.mjs';
 import { admitSplitPlan, summarizeRegularReturns } from './evaluation.mjs';
 import { runStrategy } from './replay.mjs';
 import { readReplayAudit } from './recording.mjs';
+import { verifiedRuntimeProvenance } from './provenance.mjs';
+import { openStudyCache } from './study-cache.mjs';
 
 /** Explicit last-known-equity sampling; no interpolation or future marks. */
 export function sampleEquity(report, { startTime, endTime, intervalMs, maxStalenessMs } = {}) {
@@ -72,17 +74,52 @@ function aggregateBaselines(folds, names, candidate) {
   }));
 }
 
-/** All validation folds, fresh accounts, comparable baselines and explicit metrics. */
-export async function evaluateStudy({ samples, plan, protocol }, prepareFold) {
+/** All validation folds, fresh accounts, comparable baselines and explicit metrics.
+ * Optional resume: { directory, preparationHash, previousDirectories? }.
+ * preparationHash is
+ * the caller's SHA256 attestation of callback/import content, model and strategy
+ * configuration, execution datasets/configuration, and all seeds. Runtime/data/
+ * split/protocol identities are independently pinned; closure behavior cannot be
+ * independently hashed. Cache directories hold validation folds only. Explicit
+ * previousDirectories are read-only; verified folds accumulate in directory,
+ * which must be writable by this attempt. Preserve referenced disk audit files.
+ */
+export async function evaluateStudy({ samples, plan, protocol, resume }, prepareFold) {
   protocol = protocolOf(protocol);
   requireThat(typeof prepareFold === 'function' && plan?.folds?.length > 0, 'STUDY_INPUT', 'A split plan and fold preparation callback are required');
   const admitted = admitSplitPlan(samples, plan);
   plan = admitted.plan;
+  let cache = null;
+  if (resume !== undefined) {
+    requireThat(resume && Object.keys(resume).every(key => ['directory', 'preparationHash', 'previousDirectories'].includes(key)) && typeof resume.preparationHash === 'string' && /^[0-9a-f]{64}$/.test(resume.preparationHash),
+      'STUDY_CACHE_INPUT', 'Resume requires an explicit preparationHash SHA256 covering callback dependencies, execution configuration and seeds');
+    cache = openStudyCache(resume, { datasetHash: plan.datasetHash, planHash: admitted.planHash, protocol, preparationHash: resume.preparationHash,
+      runtime: { ...verifiedRuntimeProvenance(), node: process.version, platform: process.platform, architecture: process.arch } }, plan.folds.map(fold => fold.id));
+  }
   const folds = [], identities = [];
   let baselineNames = null;
   for (const fold of plan.folds) {
     const training = admitted.foldRows(fold.id, 'train', 'train');
     const evaluation = admitted.foldRows(fold.id, 'select', 'validation');
+    const available = row => row.decisionTime ?? row.availableAt ?? row.feature?.availableAt ?? row.time;
+    const startTime = available(evaluation.rows[0]), endTime = available(evaluation.rows.at(-1));
+    const foldIdentity = { id: fold.id, foldHash: fold.hash, trainingHash: training.hash, evaluationHash: evaluation.hash, startTime, endTime };
+    const cached = cache?.load(foldIdentity);
+    if (cached) {
+      const names = cached.baselineNames;
+      requireThat(names.length > 0 && !names.includes('candidate') && hash(names) === hash([...names].sort()) && hash(names) === hash(Object.keys(cached.fold.baselines).sort()),
+        'STUDY_CACHE_CORRUPT', 'Cached fold baseline population is invalid');
+      baselineNames ??= names;
+      requireThat(hash(names) === hash(baselineNames), 'STUDY_BASELINE', 'Every cached fold must use the same baseline population');
+      for (const result of [cached.fold.candidate, ...names.map(name => cached.fold.baselines[name])]) {
+        requireThat(hash(routingIdentity(result.report, { config: cached.route.executionConfig })) === hash(cached.route), 'STUDY_CACHE_CORRUPT', 'Cached candidate and baselines must share their recorded execution identity');
+        const metrics = summarizeRegularReturns({ ...result.report, valuations: sampledEquity(result.report, { startTime, endTime, ...protocol }) }, protocol);
+        requireThat(hash(metrics) === hash(result.metrics), 'STUDY_CACHE_CORRUPT', 'Cached metrics do not match their verified report and protocol');
+      }
+      cache.save(foldIdentity, cached);
+      identities.push(cached.route); folds.push(cached.fold);
+      continue;
+    }
     const prepared = await prepareFold({ fold, training, evaluation, protocol });
     requireThat(prepared && typeof prepared.createReplay === 'function' && typeof prepared.strategy === 'function', 'STUDY_INPUT', 'Prepare a strategy and fresh replay factory');
     const baselines = prepared.baselines ?? {};
@@ -90,8 +127,6 @@ export async function evaluateStudy({ samples, plan, protocol }, prepareFold) {
     requireThat(names.length > 0 && !names.includes('candidate') && names.every(name => typeof baselines[name] === 'function'), 'STUDY_BASELINE', 'At least one named baseline strategy is required');
     baselineNames ??= names;
     requireThat(hash(names) === hash(baselineNames), 'STUDY_BASELINE', 'Every fold must use the same baseline population');
-    const available = row => row.decisionTime ?? row.availableAt ?? row.feature?.availableAt ?? row.time;
-    const startTime = available(evaluation.rows[0]), endTime = available(evaluation.rows.at(-1));
     const start = nat(startTime, 'evaluation start'), end = nat(endTime, 'evaluation end');
     const results = {};
     let identity = null;
@@ -113,8 +148,9 @@ export async function evaluateStudy({ samples, plan, protocol }, prepareFold) {
       results[variant] = { report, metrics };
     }
     identities.push(identity);
-    folds.push({ id: fold.id, foldHash: fold.hash, trainingHash: training.hash, evaluationHash: evaluation.hash,
-      startTime, endTime, candidate: results.candidate, baselines: Object.fromEntries(names.map(name => [name, results[name]])), metadata: prepared.metadata ?? null });
+    const completed = { ...foldIdentity, candidate: results.candidate, baselines: Object.fromEntries(names.map(name => [name, results[name]])), metadata: prepared.metadata ?? null };
+    cache?.save(foldIdentity, { fold: completed, route: identity, baselineNames: names });
+    folds.push(completed);
   }
   const candidate = aggregate(folds.map(fold => fold.candidate));
   const baselines = aggregateBaselines(folds, baselineNames, candidate);
