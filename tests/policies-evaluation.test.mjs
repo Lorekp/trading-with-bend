@@ -117,8 +117,15 @@ test('study runs every fold through real replay with historical warmup, reset ac
   const decisions = [], accounts = [];
   const config = { instrument, initialCash: '1000', feePerLot: '0', orderLatencyMs: '1', cancelLatencyMs: '0', maxQuoteAgeMs: '10',
     manifest: { datasetVersion: 'study-fixture', strategyArtifact: 'test', evaluationProtocol: 'validation', seed: '1' } };
-  const study = await evaluateStudy({ samples: rows, plan, protocol }, ({ fold, training, evaluation }) => {
+  const inputSamples = structuredClone(rows), inputPlan = structuredClone(plan);
+  const study = await evaluateStudy({ samples: inputSamples, plan: inputPlan, protocol }, async ({ fold, training, evaluation }) => {
     assert.equal(training.partition, 'train'); assert.equal(evaluation.partition, 'validation');
+    // The admitted study owns its snapshot even across asynchronous callbacks.
+    if (fold.id === 'fold-1') {
+      inputSamples[6].time = '999999'; inputSamples[6].labelAvailableAt = '999999';
+      inputPlan.folds[1].validation.push(11);
+      await Promise.resolve();
+    }
     let first = true;
     const strategy = Object.assign(context => {
       decisions.push({ fold: fold.id, time: context.time, history: context.history.length });
@@ -131,10 +138,25 @@ test('study runs every fold through real replay with historical warmup, reset ac
     }) };
   });
   assert.equal(study.folds.length, plan.folds.length);
+  assert.deepEqual(study.plan, plan);
   assert.equal(decisions.length, 6); assert.ok(decisions.every(row => row.history === 3 && BigInt(row.time) < 90n));
   assert.deepEqual(accounts, [0n, 0n]);
   assert.equal(study.aggregate.initialEquity, '2000'); assert.equal(study.baselines.cash.netPnl, '0');
-  for (const fold of study.folds) assert.ok(fold.candidate.report.fills.every(fill => BigInt(fill.decisionTime) >= BigInt(fold.startTime)));
+  for (const fold of study.folds) {
+    assert.ok(fold.candidate.report.fills.every(fill => BigInt(fill.decisionTime) >= BigInt(fold.startTime)));
+    for (const result of [fold.candidate, ...Object.values(fold.baselines)]) {
+      const reference = regularReturns({ ...result.report, valuations: sampleEquity(result.report, { ...protocol, startTime: fold.startTime, endTime: fold.endTime }) }, protocol);
+      assert.equal(result.metrics.returns, undefined);
+      assert.equal(result.metrics.count, reference.returns.length);
+      assert.equal(result.metrics.returnsHash, hash(reference.returns));
+      if (reference.sharpe === null) assert.equal(result.metrics.sharpe, null);
+      else assert.ok(Math.abs(result.metrics.sharpe - reference.sharpe) < 1e-10);
+    }
+  }
+  let callbacks = 0;
+  await assert.rejects(evaluateStudy({ samples: rows, plan: inputPlan, protocol }, () => { callbacks++; }), { code: 'SPLIT_TAMPER' });
+  await assert.rejects(evaluateStudy({ samples: inputSamples, plan, protocol }, () => { callbacks++; }), { code: 'DATASET_MISMATCH' });
+  assert.equal(callbacks, 0, 'Reject changed input before exposing any partition');
   const selection = selectStudy([{ id: 'failed', status: 'failed', error: 'crash' }, { id: 'abandoned', status: 'abandoned' },
     { id: 'b', status: 'completed', study }, { id: 'a', status: 'completed', study: JSON.parse(JSON.stringify(study)) }]);
   assert.equal(selection.selectedId, 'a'); assert.equal(selection.population.length, 4);
@@ -156,6 +178,35 @@ test('study runs every fold through real replay with historical warmup, reset ac
       executionVenue: new QuoteExecutionVenue({ id: 'study-venue', config, ticks, maxPositionLots: variant === 'candidate' ? '1' : '2' }) }) })), { code: 'STUDY_BASELINE' });
   const incompatible = structuredClone(study); incompatible.comparisonHash = hash('different-policy'); delete incompatible.hash; incompatible.hash = hash(incompatible);
   assert.throws(() => selectStudy([{ id: 'a', status: 'completed', study }, { id: 'b', status: 'completed', study: incompatible }]), { code: 'STUDY_COMPARISON' });
+});
+
+test('disk study streams thousands of valuations into compact metrics matching the array reference', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'bend-study-scale-'));
+  const instrument = { symbol: 'TICKS', currency: 'EUR', lotSize: '1', priceTick: '1' };
+  const ticks = Array.from({ length: 6000 }, (_, i) => ({ id: `q${i}`, type: 'tick', time: String(i), sourceTime: String(i), sequence: String(i + 1),
+    symbol: instrument.symbol, currency: instrument.currency, bid: String(100 + i % 37), ask: String(101 + i % 37), bidLots: '10', askLots: '10' }));
+  const rows = ticks.map(t => ({ id: t.id, time: t.time, labelAvailableAt: t.time }));
+  const plan = walkForwardSplits(rows, { trainSize: 1000, validationSize: 2000, finalStart: 5000 });
+  const protocol = { warmup: 'history-only', account: 'reset-per-fold', intervalMs: '1', periodsPerYear: 252, maxStalenessMs: '0' };
+  const config = { instrument, initialCash: '100000', feePerLot: '0', orderLatencyMs: '1', cancelLatencyMs: '0', maxQuoteAgeMs: '1',
+    manifest: { datasetVersion: 'scale-ticks', strategyArtifact: 'hold', evaluationProtocol: 'validation', seed: '1' } };
+  const informationSource = quoteInformationSource({ id: 'ticks', instrument, ticks });
+  const study = await evaluateStudy({ samples: rows, plan, protocol }, ({ fold }) => ({
+    strategy: targetPosition('1'), baselines: { cash: targetPosition('0') },
+    createReplay: ({ variant }) => ({ informationSource,
+      executionVenue: new QuoteExecutionVenue({ id: 'quotes', config, ticks, maxPositionLots: '1', auditDirectory: join(directory, fold.id, variant) }) }),
+  }));
+  for (const fold of study.folds) for (const result of [fold.candidate, ...Object.values(fold.baselines)]) {
+    assert.equal(result.report.valuations, undefined);
+    const valuations = sampleEquity(result.report, { ...protocol, startTime: fold.startTime, endTime: fold.endTime });
+    const reference = regularReturns({ ...result.report, valuations }, protocol);
+    assert.equal(result.metrics.count, 1999);
+    assert.equal(result.metrics.returnsHash, hash(reference.returns));
+    assert.ok(JSON.stringify(result.metrics).length < 1000, 'Metric result size is independent of sampled grid length');
+    if (reference.sharpe === null) assert.equal(result.metrics.sharpe, null);
+    else assert.ok(Math.abs(result.metrics.sharpe - reference.sharpe) < 1e-10);
+  }
+  assert.equal(selectStudy([{ id: 'scale', status: 'completed', study }]).selectedId, 'scale');
 });
 
 test('research worker fits and evaluates every fold with common baselines and immutable artifacts', async () => {

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, copyFileSync, linkSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve, toNamespacedPath } from 'node:path';
 import { serialize, deserialize } from 'node:v8';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { CanonicalArrayHash, canonical, freeze, hash, immutableCopy, requireThat } from './core.mjs';
 
 const require = createRequire(import.meta.url);
@@ -13,6 +14,11 @@ const fileHash = path => {
   return digest.digest('hex');
 };
 const decode = value => freeze(deserialize(value));
+const decodeChunk = row => {
+  const values = decode(inflateRawSync(row.payload));
+  requireThat(Array.isArray(values) && values.length === row.count, 'AUDIT_CORRUPT', 'Audit chunk count differs');
+  return values;
+};
 const publishManifest = (path, body) => {
   // A failed write/fsync must never leave a completed manifest discoverable.
   const temporary = `${path}.${randomUUID()}.pending`;
@@ -28,6 +34,7 @@ const publishManifest = (path, body) => {
 export class ReplayRecording {
   #database; #directory; #file; #series = new Map(); #maps = new Map();
   #failed = false; #sealed = false; #pending = 0; #manifest;
+  #flushers = [];
   constructor(directory) {
     if (directory === undefined) return;
     requireThat(typeof directory === 'string' && directory.length > 0, 'AUDIT_PATH', 'auditDirectory must be a new directory');
@@ -38,7 +45,7 @@ export class ReplayRecording {
     const { DatabaseSync } = require('node:sqlite');
     this.#database = new DatabaseSync(toNamespacedPath(this.#file));
     this.#database.exec(`PRAGMA cache_size=-2048; PRAGMA temp_store=FILE; PRAGMA synchronous=FULL;
-      CREATE TABLE records (stream TEXT NOT NULL, ordinal INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(stream, ordinal));
+      CREATE TABLE records (stream TEXT NOT NULL, ordinal INTEGER NOT NULL, count INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(stream, ordinal)) WITHOUT ROWID;
       CREATE TABLE keyed (namespace TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL, UNIQUE(namespace, key));
       BEGIN`);
   }
@@ -49,18 +56,30 @@ export class ReplayRecording {
   series(name) {
     if (this.#series.has(name)) return this.#series.get(name);
     const data = [], digest = new CanonicalArrayHash(), owner = this, db = this.#database;
-    const insert = db?.prepare('INSERT INTO records VALUES (?, ?, ?)');
+    const insert = db?.prepare('INSERT INTO records VALUES (?, ?, ?, ?)');
+    let pending = [], bytes = 0;
+    const flushChunk = () => {
+      if (!pending.length) return;
+      try { insert.run(name, digest.count - pending.length, pending.length, deflateRawSync(serialize(pending), {level:1})); }
+      catch (error) { owner.abort(); throw error; }
+      pending = []; bytes = 0;
+    };
+    if (db) this.#flushers.push(flushChunk);
     const series = {
       get length() { return digest.count; },
       get hash() { return digest.digest(); },
       push(...values) { owner.assertWritable(); for (const value of values) {
-        if (db) insert.run(name, digest.count, serialize(value)); else data.push(immutableCopy(value));
-        digest.push(value);
+        const snapshot = immutableCopy(value);
+        if (db) {
+          pending.push(snapshot); bytes += digest.push(snapshot);
+          if (pending.length >= 512 || bytes >= 262144) flushChunk();
+        } else { data.push(snapshot); digest.push(snapshot); }
       } return digest.count; },
       *[Symbol.iterator]() {
         if (!db) { yield* data; return; }
         if (owner.#sealed) { yield* readReplayAudit(owner.#manifest, name); return; }
-        for (const row of db.prepare('SELECT payload FROM records WHERE stream=? ORDER BY ordinal').iterate(name)) yield decode(row.payload);
+        flushChunk();
+        for (const row of db.prepare('SELECT count,payload FROM records WHERE stream=? ORDER BY ordinal').iterate(name)) yield* decodeChunk(row);
       },
       slice() { return [...this]; },
       reduce(fn, initial) { let value = initial, i = 0; for (const row of this) value = fn(value, row, i++); return value; },
@@ -71,10 +90,11 @@ export class ReplayRecording {
     if (this.#maps.has(name)) return this.#maps.get(name);
     const data = new Map(), db = this.#database, owner = this;
     const select = db?.prepare('SELECT payload FROM keyed WHERE namespace=? AND key=?');
+    const exists = db?.prepare('SELECT 1 FROM keyed WHERE namespace=? AND key=?');
     const insert = db?.prepare('INSERT INTO keyed(namespace,key,payload) VALUES(?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET payload=excluded.payload');
     const map = {
       get(key) { return db ? (() => { const row = select.get(name, String(key)); return row ? decode(row.payload) : undefined; })() : data.get(String(key)); },
-      has(key) { return db ? Boolean(select.get(name, String(key))) : data.has(String(key)); },
+      has(key) { return db ? Boolean(exists.get(name, String(key))) : data.has(String(key)); },
       set(key,value) { owner.assertWritable(); if (db) insert.run(name,String(key),serialize(value)); else data.set(String(key),immutableCopy(value)); return this; },
       add(key) { return this.set(key,true); },
       *values() { if (!db) yield* data.values(); else {
@@ -87,18 +107,18 @@ export class ReplayRecording {
   transaction(work) {
     this.assertWritable();
     try {
-      if (this.#database) this.#database.exec('SAVEPOINT event');
       const result = work();
       if (this.#database) {
-        this.#database.exec('RELEASE event');
-        if (++this.#pending >= 1024) this.flush();
+        if (++this.#pending >= 8192) this.flush();
       }
       return result;
     } catch (error) { this.abort(); throw error; }
   }
   flush() {
     this.assertWritable();
-    if (this.#database) { this.#database.exec('COMMIT; BEGIN'); this.#pending = 0; }
+    try {
+      if (this.#database) { for (const flush of this.#flushers) flush(); this.#database.exec('COMMIT; BEGIN'); this.#pending = 0; }
+    } catch (error) { this.abort(); throw error; }
   }
   contentHash(names) {
     this.assertValid();
@@ -121,7 +141,7 @@ export class ReplayRecording {
       for (const value of this.#maps.get(name).values()) digest.push(value);
       streams[name] = {count:digest.count,hash:digest.digest(),kind:'map'};
     }
-    const body = { format:'bend-replay-audit-v1', file:basename(file), bytes:statSync(file).size, sha256:fileHash(file), streams, metadata };
+    const body = { format:'bend-replay-audit-v2', file:basename(file), bytes:statSync(file).size, sha256:fileHash(file), streams, metadata };
     const manifest = {...body,checksum:hash(body)};
     const manifestPath = join(this.#directory,manifestName);
     if (publish) publishManifest(manifestPath,manifest);
@@ -162,24 +182,43 @@ export function openReplayAudit(input) {
   requireThat(typeof manifestPath === 'string','AUDIT_MANIFEST','A completed audit manifest is required');
   const manifest = JSON.parse(readFileSync(manifestPath,'utf8'));
   const {checksum,...body}=manifest;
-  requireThat(body.format==='bend-replay-audit-v1' && checksum===hash(body) && basename(body.file)===body.file,'AUDIT_CORRUPT','Audit manifest is invalid');
+  requireThat(body.format==='bend-replay-audit-v2' && checksum===hash(body) && basename(body.file)===body.file,'AUDIT_CORRUPT','Audit manifest is invalid or needs its original toolkit version');
   if (typeof descriptor==='object') requireThat(descriptor.checksum===checksum,'AUDIT_CORRUPT','Audit descriptor changed');
   const file=join(dirname(manifestPath),body.file);
   requireThat(statSync(file).size===body.bytes && fileHash(file)===body.sha256,'AUDIT_CORRUPT','Audit database bytes changed');
   const {DatabaseSync}=require('node:sqlite');
   const db = new DatabaseSync(toNamespacedPath(file),{readOnly:true});
   db.exec('PRAGMA cache_size=-2048; PRAGMA query_only=ON');
+  const exists = db.prepare('SELECT 1 FROM keyed WHERE namespace=? AND key=?');
+  const cursors = new Set();
+  let closed = false;
+  const assertOpen = () => requireThat(!closed, 'AUDIT_CLOSED', 'Audit reader is closed');
   return {
     manifest:freeze({...manifest,manifestPath}),
     *records(stream) {
+      assertOpen();
       const spec=body.streams[stream]; requireThat(spec,'AUDIT_STREAM',`Unknown audit stream ${stream}`);
-      const query=spec.kind==='series'?'SELECT payload FROM records WHERE stream=? ORDER BY ordinal':'SELECT payload FROM keyed WHERE namespace=? ORDER BY rowid';
+      const query=spec.kind==='series'?'SELECT ordinal,count,payload FROM records WHERE stream=? ORDER BY ordinal':'SELECT payload FROM keyed WHERE namespace=? ORDER BY rowid';
       const digest=new CanonicalArrayHash();
-      for(const row of db.prepare(query).iterate(stream)) {const value=decode(row.payload); digest.push(value); yield value;}
+      const cursor = db.prepare(query).iterate(stream); cursors.add(cursor);
+      try { for (;;) {
+        assertOpen();
+        const next = cursor.next(); if (next.done) break;
+        const row = next.value;
+        if (spec.kind === 'series') {
+          requireThat(row.ordinal === digest.count, 'AUDIT_CORRUPT', 'Audit chunk sequence differs');
+          for (const value of decodeChunk(row)) { assertOpen(); digest.push(value); yield value; }
+        } else { const value=decode(row.payload); digest.push(value); yield value; }
+      } } finally { if (cursors.delete(cursor)) cursor.return?.(); }
       requireThat(digest.count===spec.count && digest.digest()===spec.hash,'AUDIT_CORRUPT','Audit content identity differs');
     },
-    has(stream,key) { return Boolean(db.prepare('SELECT 1 FROM keyed WHERE namespace=? AND key=?').get(stream,String(key))); },
-    close() { db.close(); },
+    has(stream,key) { assertOpen(); return Boolean(exists.get(stream,String(key))); },
+    close() {
+      if (closed) return;
+      closed = true;
+      try { for (const cursor of cursors) cursor.return?.(); }
+      finally { cursors.clear(); db.close(); }
+    },
   };
 }
 

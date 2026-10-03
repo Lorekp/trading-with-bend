@@ -1,10 +1,14 @@
 import { freeze, hash, integer, nat, requireThat } from './core.mjs';
-import { foldRows, regularReturns } from './evaluation.mjs';
+import { admitSplitPlan, summarizeRegularReturns } from './evaluation.mjs';
 import { runStrategy } from './replay.mjs';
 import { readReplayAudit } from './recording.mjs';
 
 /** Explicit last-known-equity sampling; no interpolation or future marks. */
 export function sampleEquity(report, { startTime, endTime, intervalMs, maxStalenessMs } = {}) {
+  return [...sampledEquity(report, { startTime, endTime, intervalMs, maxStalenessMs })];
+}
+
+function* sampledEquity(report, { startTime, endTime, intervalMs, maxStalenessMs }) {
   const start = nat(startTime, 'startTime'), end = nat(endTime, 'endTime');
   const interval = nat(intervalMs, 'intervalMs', true), age = nat(maxStalenessMs, 'maxStalenessMs');
   requireThat(end >= start && (end - start) % interval === 0n, 'METRIC_GRID', 'Evaluation endpoints must lie on the declared sampling grid');
@@ -12,25 +16,24 @@ export function sampleEquity(report, { startTime, endTime, intervalMs, maxStalen
   requireThat(!report.terminal?.bankrupt && BigInt(report.terminal?.deficit ?? '0') === 0n, 'UNDEFINED_RETURN', 'Deficit accounts cannot produce ordinary return metrics');
   const rows = report.audit ? readReplayAudit(report, 'valuations') : report.valuations;
   requireThat(rows && typeof rows[Symbol.iterator] === 'function', 'INVALID_REPORT', 'Valuation records required');
-  const sampled = [];
   let next = start, previousTime = null, latest = null;
   const emit = () => {
     requireThat(latest && next - BigInt(latest.time) <= age, 'STALE_SAMPLING', 'No sufficiently fresh valuation at sampling time');
     requireThat(latest.equity !== null && integer(String(latest.equity), 'equity') > 0n, 'UNDEFINED_RETURN', 'Ordinary returns require positive, marked equity');
-    sampled.push({ time: String(next), equity: String(latest.equity) }); next += interval;
+    const row = { time: String(next), equity: String(latest.equity) }; next += interval;
+    return row;
   };
   for (const row of rows) {
     const time = nat(typeof row.time === 'bigint' ? String(row.time) : row.time, 'valuation.time');
     requireThat(previousTime === null || time >= previousTime, 'IRREGULAR_SAMPLING', 'Valuation times cannot decrease');
     previousTime = time;
     // Emit strictly earlier grid points: the last record at a timestamp wins.
-    while (next <= end && next < time) emit();
+    while (next <= end && next < time) yield emit();
     if (time >= start && time <= end) requireThat(row.equity !== null && integer(String(row.equity), 'equity') > 0n,
       'UNDEFINED_RETURN', 'Unmarked or nonpositive equity inside evaluation invalidates ordinary returns');
     latest = row;
   }
-  while (next <= end) emit();
-  return sampled;
+  while (next <= end) yield emit();
 }
 
 function protocolOf(protocol) {
@@ -73,12 +76,13 @@ function aggregateBaselines(folds, names, candidate) {
 export async function evaluateStudy({ samples, plan, protocol }, prepareFold) {
   protocol = protocolOf(protocol);
   requireThat(typeof prepareFold === 'function' && plan?.folds?.length > 0, 'STUDY_INPUT', 'A split plan and fold preparation callback are required');
-  plan = freeze(structuredClone(plan));
+  const admitted = admitSplitPlan(samples, plan);
+  plan = admitted.plan;
   const folds = [], identities = [];
   let baselineNames = null;
   for (const fold of plan.folds) {
-    const training = foldRows(samples, plan, fold.id, 'train', 'train');
-    const evaluation = foldRows(samples, plan, fold.id, 'select', 'validation');
+    const training = admitted.foldRows(fold.id, 'train', 'train');
+    const evaluation = admitted.foldRows(fold.id, 'select', 'validation');
     const prepared = await prepareFold({ fold, training, evaluation, protocol });
     requireThat(prepared && typeof prepared.createReplay === 'function' && typeof prepared.strategy === 'function', 'STUDY_INPUT', 'Prepare a strategy and fresh replay factory');
     const baselines = prepared.baselines ?? {};
@@ -101,8 +105,8 @@ export async function evaluateStudy({ samples, plan, protocol }, prepareFold) {
       const run = runStrategy(source, executionVenue, gated);
       requireThat(run.endTime === endTime, 'STUDY_WINDOW', 'Information source must reach the exact evaluation endpoint');
       const report = run.report();
-      const valuations = sampleEquity(report, { startTime, endTime, ...protocol });
-      const metrics = regularReturns({ ...report, valuations }, protocol);
+      const valuations = sampledEquity(report, { startTime, endTime, ...protocol });
+      const metrics = summarizeRegularReturns({ ...report, valuations }, protocol);
       const route = routingIdentity(report, executionVenue);
       identity ??= route;
       requireThat(hash(route) === hash(identity), 'STUDY_BASELINE', 'Candidate and baselines must share information and execution datasets, instruments and models');
@@ -114,8 +118,8 @@ export async function evaluateStudy({ samples, plan, protocol }, prepareFold) {
   }
   const candidate = aggregate(folds.map(fold => fold.candidate));
   const baselines = aggregateBaselines(folds, baselineNames, candidate);
-  const body = { format: 'validation-study-v1', partition: 'validation', status: 'completed', datasetHash: plan.datasetHash, planHash: hash(plan), plan, protocol,
-    comparisonHash: hash({ datasetHash: plan.datasetHash, planHash: hash(plan), protocol, identities, baselineNames,
+  const body = { format: 'validation-study-v1', partition: 'validation', status: 'completed', datasetHash: plan.datasetHash, planHash: admitted.planHash, plan, protocol,
+    comparisonHash: hash({ datasetHash: plan.datasetHash, planHash: admitted.planHash, protocol, identities, baselineNames,
       baselineSignals: folds.map(fold => baselineNames.map(name => fold.baselines[name].report.signals.targetsHash)) }), folds, aggregate: candidate, baselines };
   return freeze({ ...body, hash: hash(body) });
 }

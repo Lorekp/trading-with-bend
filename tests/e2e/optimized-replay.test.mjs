@@ -3,6 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
 import { Backtest, orders } from '../../src/framework.mjs';
 import { MAX_NAT } from '../../src/core.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion, targetPosition } from '../../src/strategies.mjs';
@@ -16,6 +18,7 @@ import { quoteInformationSource, InformationSource } from '../../src/information
 import { QuoteExecutionVenue } from '../../src/execution-venue.mjs';
 import { runStrategy as replay } from '../../src/replay.mjs';
 import { sampleEquity } from '../../src/study.mjs';
+import { listExperiments, readExperimentResult } from '../../src/experiments.mjs';
 
 test('default storage keeps historical orders out of matching across 6000 submit/cancel cycles', () => {
   const run = new Backtest({ ...config, cancelLatencyMs: '0' }, { traceMode: 'compact' });
@@ -405,6 +408,52 @@ test('disk checkpoint is an immutable prefix and resumes into a distinct audit w
   assert.deepEqual([...readReplayAudit(checkpoint.audit, 'events')], events.slice(0, 3));
   assert.throws(() => Backtest.resume(checkpoint), { code: 'CHECKPOINT_OPTIONS' });
   assert.throws(() => Backtest.resume(checkpoint, { auditDirectory: join(root, 'original') }), { code: 'EEXIST' });
+
+  // Exercise both committed recording batches and an unfinished tail. Callers
+  // may reuse an event object immediately after step() has accepted its value.
+  const many = ticks(1307), input = {}, split = 777;
+  const longRun = new Backtest(config, { auditDirectory: join(root, 'long-original') }); auditCleanup(t, () => longRun.abort());
+  for (const event of many.slice(0, split)) longRun.step(Object.assign(input, event));
+  const prefix = longRun.checkpoint(), prefixBytes = readFileSync(prefix.audit.manifestPath);
+  const continuation = Backtest.resume(prefix, { auditDirectory: join(root, 'long-resumed') }); auditCleanup(t, () => continuation.abort());
+  for (const event of many.slice(split)) { longRun.step(Object.assign(input, event)); continuation.step(event); }
+  input.bid = '99999'; input.id = 'changed-after-acceptance';
+  const expected = new Backtest(config, { traceMode: 'compact' }).run(many).report();
+  assert.deepEqual(withoutAudit(longRun.report({ detail: 'full' })), expected);
+  assert.deepEqual(withoutAudit(continuation.report({ detail: 'full' })), expected);
+  assert.deepEqual([...readReplayAudit(longRun.report(), 'events')], many);
+  assert.deepEqual([...readReplayAudit(prefix.audit, 'events')], many.slice(0, split));
+  assert.deepEqual(readFileSync(prefix.audit.manifestPath), prefixBytes);
+});
+
+test('a failed buffered audit write poisons the replay and cannot publish a completed manifest', t => {
+  const root = auditDirectory(t);
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  let failWrites = false, failures = 0, run;
+  DatabaseSync.prototype.prepare = function (...args) {
+    const statement = originalPrepare.apply(this, args), originalRun = statement.run;
+    statement.run = function (...values) {
+      if (failWrites) { failures++; throw Object.assign(new Error('Audit device write failed'), { code: 'EIO' }); }
+      return originalRun.apply(this, values);
+    };
+    return statement;
+  };
+  try {
+    for (const operation of ['report', 'checkpoint']) {
+      const directory = join(root, operation);
+      failWrites = false; failures = 0;
+      run = new Backtest(config, { auditDirectory: directory }).run(ticks(7));
+      const ledger = run.ledger;
+      failWrites = true;
+      assert.throws(() => run[operation](), { code: 'EIO' });
+      assert.equal(failures, 1);
+      assert.deepEqual(run.ledger, ledger);
+      assert.throws(() => run.report(), { code: 'AUDIT_FAILED' });
+      assert.deepEqual(readdirSync(directory).filter(name => name.endsWith('.json')), []);
+      assert.throws(() => openReplayAudit(join(directory, 'manifest.json')), { code: 'ENOENT' });
+      run.abort();
+    }
+  } finally { DatabaseSync.prototype.prepare = originalPrepare; run?.abort(); }
 });
 
 test('disk failures preserve ID rules and never publish incomplete or corrupt audits', t => {
@@ -493,9 +542,13 @@ test('empty quote preparation validates instrument units before creating an arti
 });
 
 test('admitted quotes supply independent reusable cursors and reserve future market IDs exactly', async t => {
-  const root = auditDirectory(t), quotes = ticks(8);
+  const root = auditDirectory(t), quotes = ticks(1307);
   quotes[2].id = 'strategy-2'; quotes[3].id = 'strategy-2-'; quotes[4].id = 'venue-clock-3';
-  const dataset = await prepareQuoteData((async function* () { for (const quote of quotes) yield quote; })(), { instrument: config.instrument, directory: join(root, 'data') });
+  const dataset = await prepareQuoteData((async function* () {
+    const input = {};
+    for (const quote of quotes) yield Object.assign(input, quote);
+    input.id = 'changed-after-admission'; input.bid = '99999';
+  })(), { instrument: config.instrument, directory: join(root, 'data') });
   auditCleanup(t, () => dataset.close());
   const informationSource = quoteInformationSource({ id: 'shared-source', instrument: config.instrument, ticks: dataset });
   const execute = input => replay(quoteInformationSource({ id: 'shared-source', instrument: config.instrument, ticks: input }),
@@ -550,4 +603,53 @@ test('large disk replay returns bounded summary while every audit record remains
   assert.ok(!Object.hasOwn(report, 'orders') && !Object.hasOwn(report, 'trace') && !Object.hasOwn(report, 'valuations'));
   let seen = 0; for (const fill of readReplayAudit(report, 'fills')) { assert.equal(fill.quantity, 1n); seen++; }
   assert.equal(seen, count - 1);
+});
+
+test('five campaign workers reuse one admitted dataset and match independent memory replays under a heap limit', { timeout: 120000 }, async t => {
+  const root = auditDirectory(t), count = 1307, orderEvery = 32;
+  const instrument = { symbol: 'BENCH', currency: 'USDT', lotSize: '0.001', priceTick: '1' };
+  const quotes = Array.from({ length: count }, (_, index) => ({
+    id: `tick-${index}`, type: 'tick', sequence: String(index + 1), time: String(index), sourceTime: String(index),
+    symbol: instrument.symbol, currency: instrument.currency, bid: '9999', ask: '10000', bidLots: '100', askLots: '100'
+  }));
+  const data = await prepareQuoteData(quotes, { instrument, directory: join(root, 'shared-data') });
+  const datasetHash = data.manifest.datasetHash, manifestPath = data.manifest.audit.manifestPath;
+  data.close();
+  const admittedBytes = readFileSync(manifestPath), campaign = join(root, 'campaign');
+  const result = spawnSync(process.execPath, ['scripts/benchmark-campaign.mjs', '--output', campaign,
+    '--dataset', manifestPath, '--ticks', String(count), '--workers', '5', '--order-every', String(orderEvery)], {
+    encoding: 'utf8', timeout: 90000, windowsHide: true,
+    env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=128` }
+  });
+  assert.ifError(result.error); assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  const summary = JSON.parse(readFileSync(join(campaign, 'summary.json'), 'utf8'));
+  assert.equal(summary.workers, 5); assert.equal(summary.count, count);
+  assert.equal(summary.results.length, 5);
+  assert.ok(summary.results.every(row => row.status === 'completed'), JSON.stringify(summary.results));
+  assert.deepEqual(readFileSync(manifestPath), admittedBytes);
+  assert.equal(existsSync(join(campaign, 'data')), false, 'Workers reuse the supplied admitted data');
+  const registry = join(campaign, 'registry'), jobs = listExperiments(registry), audits = new Set();
+  assert.equal(jobs.length, 5);
+  assert.deepEqual(new Set(jobs.map(job => job.configuration.manifestPath)), new Set([manifestPath]));
+  assert.equal(new Set(jobs.map(job => job.attempts.at(-1).workerPid)).size, 5);
+  for (const job of jobs) {
+    assert.equal(job.status, 'completed'); assert.equal(job.attempts.length, 1);
+    const actual = readExperimentResult(registry, job.key), index = job.configuration.index;
+    const configuration = { instrument, initialCash: '100000000', feePerLot: '1', orderLatencyMs: '0', cancelLatencyMs: '0', maxQuoteAgeMs: '60000',
+      manifest: { datasetVersion: datasetHash, strategyArtifact: 'scaling-roundtrip', evaluationProtocol: 'capacity-only', seed: String(index) } };
+    const venue = new QuoteExecutionVenue({ id: 'scaling-venue', config: configuration, ticks: quotes, maxPositionLots: '1', traceMode: 'compact' });
+    const expected = replay(quoteInformationSource({ id: 'scaling-source', instrument, ticks: quotes }), venue,
+      ({ index: row, ledger }) => row < count - 1 && row % orderEvery === index % orderEvery ? (ledger.quantity === 0n ? '1' : '0') : null,
+      { lookback: 256 }).report();
+    assert.equal(actual.traceHash, expected.traceHash, job.key);
+    assert.deepEqual(actual.ledger, expected.ledger, job.key);
+    assert.equal(actual.fills, expected.fills.length); assert.ok(actual.fills > 30);
+    const report = JSON.parse(readFileSync(join(job.attempts[0].outputDirectory, 'report.json'), 'utf8'));
+    assert.equal(report.trace, undefined);
+    assert.equal(report.routing.informationSource.datasetHash, datasetHash);
+    assert.equal(report.audit.streams.trace.count, expected.trace.length);
+    assert.deepEqual(plain([...readReplayAudit(report, 'fills')]), expected.fills);
+    audits.add(report.audit.manifestPath);
+  }
+  assert.equal(audits.size, 5, 'Every worker owns its complete audit');
 });

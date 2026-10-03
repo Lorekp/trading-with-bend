@@ -38,8 +38,10 @@ export class CanonicalArrayHash {
   #count = 0;
   get count() { return this.#count; }
   push(value) {
+    const encoded = canonical(value);
     if (this.#count) this.#hash.update(',');
-    this.#hash.update(canonical(value)); this.#count++;
+    this.#hash.update(encoded); this.#count++;
+    return Buffer.byteLength(encoded);
   }
   digest() { return this.#hash.copy().update(']').digest('hex'); }
 }

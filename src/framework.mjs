@@ -92,6 +92,7 @@ export class Backtest {
   #allOrders;
   #publicState;
   #workingOrders;
+  #activeArchive = new Map();
   #recording;
   #fees = 0n;
   #peak;
@@ -184,7 +185,7 @@ export class Backtest {
         state = result.state; status = result.$ === 'Accepted' ? 'accepted' : 'rejected-capital-or-fee';
       } else if (event.type === 'cancel') {
         const id = BigInt(event.orderId), pending = previousOrders.some(order => order.id === id);
-        const archived = archiveUpdates.get(id) ?? this.#archive.get(id);
+        const archived = pending ? null : archiveUpdates.get(id) ?? this.#archive.get(id);
         requireThat(pending || this.#options.orderStorage === 'active' && archived, 'UNKNOWN_ORDER', 'Cannot cancel an unaccepted order');
         const arrival = checked(t + BigInt(this.#config.cancelLatencyMs), 'cancel arrival');
         if (pending) {
@@ -240,7 +241,7 @@ export class Backtest {
         reservations, fills: newFills.map(f => f.id) };
       this.#recording.transaction(() => {
         for (const [id, order] of archiveUpdates) {
-          const previous = this.#archive.get(id);
+          const previous = this.#activeArchive.get(id) ?? this.#archive.get(id);
           if (!previous || !sameOrder(previous, order)) this.#archive.set(id, order);
         }
         this.#seen.set(event.id, digest); if (event.type === 'submit') this.#orderIds.add(event.orderId);
@@ -251,6 +252,7 @@ export class Backtest {
       });
       // Commit only after accounting and recording checks pass.
       this.#state = freeze(state); this.#mark = freeze(mark); this.#lastTime = t; this.#lastSequence = seq;
+      if (this.#options.orderStorage === 'active' && finalOrders !== this.#orders) this.#activeArchive = new Map(finalOrders.map(order => [order.id, order]));
       this.#orders = freeze(finalOrders);
       this.#reservations = freeze(reservations);
       for (const [id, order] of archiveUpdates) {
