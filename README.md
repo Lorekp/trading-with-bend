@@ -132,6 +132,25 @@ npm run benchmark -- --ticks 200000 --orders 1000 --lookback 64 --profile --data
 
 Use fresh directories for each disk run. The benchmark generates its disk input lazily and reports preparation, replay, report/finalization time, process peak RSS and CPU samples. It defaults to a 256-observation lookback, compact trace and active orders; `--lookback all` explicitly measures complete history. Array input and in-memory audit remain available for reference comparisons.
 
+Release profiling on 2026-10-03 used Node 24.12.0, Windows x64 and a Ryzen
+7600X, with 500 fills, lookback 256 and compact/active recording. These are
+single-run measurements, including preparation and final reporting:
+
+| Quotes | Input / audit storage | Total seconds | Peak RSS MiB |
+| ---: | --- | ---: | ---: |
+| 200,000 | memory / memory | 13.4 | 1,191 |
+| 200,000 | disk / disk | 33.3 | 314 |
+| 1,000,000 | disk / disk | 166.2 | 332 |
+
+Both large disk runs used `node --expose-gc --max-old-space-size=128`.
+The 200,000-quote memory and disk paths produced identical trace hashes,
+500 fills and the same exact ending ledger. Disk storage trades throughput
+for bounded historical retention; it does not bound working orders, strategy
+state or explicitly materialized reports. The 43,000-quote disk CPU sample
+spent about 9.5% in SQLite batch flushes, 8% in recording appends, 7.4% in
+record reads and 6.5% in garbage collection. Reprofile on the deployment host
+before choosing campaign concurrency.
+
 ```powershell
 npm run proof
 ```
