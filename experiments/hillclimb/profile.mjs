@@ -1,7 +1,8 @@
 import { readFileSync, mkdirSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { enqueueExperiment, runQueue, readExperimentResult } from '../../src/experiments.mjs';
-import { requireThat } from '../../src/core.mjs';
+import { hash, requireThat } from '../../src/core.mjs';
+import { runtimeProvenance } from '../../src/provenance.mjs';
 import { resolveProtocol } from '../speed/protocol.mjs';
 
 // Reuse a saved benchmark run request, outside any timed comparison.
@@ -15,11 +16,13 @@ process.env.NODE_OPTIONS = `--max-old-space-size=${protocol.heapMiB}`;
 const manifest = JSON.parse(readFileSync(request.configuration.manifestPath, 'utf8'));
 mkdirSync(dirname(registry), { recursive: true });
 mkdirSync(registry); // Retain every attempt; never reuse a profiling registry.
-const key = `hillclimb/profile/${basename(registry)}`;
-enqueueExperiment(registry, { key, workerModule: new URL('./profile-worker.mjs', import.meta.url),
+const workerModule = new URL('./profile-worker.mjs', import.meta.url), benchmarkWorker = new URL('../speed/worker.mjs', import.meta.url);
+const key = `hillclimb/profile/${hash({ configuration: request.configuration, toolkit: runtimeProvenance(),
+  worker: hash(readFileSync(workerModule, 'utf8')), benchmarkWorker: hash(readFileSync(benchmarkWorker, 'utf8')) })}`;
+enqueueExperiment(registry, { key, workerModule,
   configuration: request.configuration, seed: request.configuration.seed,
   dependencies: [requestPath, request.protocolPath, request.configuration.manifestPath,
-    join(dirname(request.configuration.manifestPath), manifest.file), new URL('../speed/worker.mjs', import.meta.url)] });
+    join(dirname(request.configuration.manifestPath), manifest.file), benchmarkWorker] });
 const jobs = await runQueue(registry, { concurrency: 1, timeoutMs: request.timeoutMs });
 if (jobs.some(job => job.status !== 'completed')) {
   console.error(JSON.stringify(jobs, null, 2));
