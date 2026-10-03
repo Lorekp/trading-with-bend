@@ -3,6 +3,24 @@ import ./LAWS.bend as Laws
 import ./bend/Engine.bend as E
 import ./bend/Policy.bend as P
 
+def Laws.derivative_posting_is_exact(credits, debits, credit, debit):
+  {==}
+
+def derivative_add_zero(a: Nat) -> {Nat.add(a, 0n) == a : Nat}:
+  match a:
+    case 0n:
+      {==}
+    case 1n+p:
+      %derivative_add_zero(p) : {1n+Nat.add(p, 0n) == 1n+_ : Nat}
+      {==}
+
+def Laws.derivative_zero_posting_preserves_cash(credits, debits):
+  %derivative_add_zero(credits) :
+    {E.DerivativeCash{Nat.add(credits, 0n), Nat.add(debits, 0n)} == E.DerivativeCash{_, debits} : E.DerivativeCash}
+  %derivative_add_zero(debits) :
+    {E.DerivativeCash{Nat.add(credits, 0n), Nat.add(debits, 0n)} == E.DerivativeCash{Nat.add(credits, 0n), _} : E.DerivativeCash}
+  {==}
+
 law subtract_added:
   for amount: Nat
   for spare: Nat

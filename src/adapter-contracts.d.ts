@@ -51,7 +51,7 @@ export interface ExecutionVenue<Report = Record<string, unknown>> {
   readonly manifest: AdapterManifest;
   advanceTo(time: Decimal): void;
   snapshot(): AccountSnapshot;
-  /** Intent only. Venue owns admission, sizing, order type/price, IDs and cancellation. */
+  /** Signed intent; cash venues reject negatives. Venue owns admission and orders. */
   setTarget(target: Decimal, time: Decimal): void;
   /** End at this time (null for an empty source), with no implicit liquidation. */
   finish(time: Decimal | null): void;
@@ -70,7 +70,7 @@ export interface StrategyContext<Data = Record<string, unknown>> {
   readonly equity: AccountSnapshot['equity'];
 }
 
-/** null skips reconciliation; '0' explicitly requests a flat position. */
+/** null skips reconciliation; '0' requests flat; negatives request short exposure. */
 export type Strategy<Data = Record<string, unknown>> = ((context: StrategyContext<Data>) => Decimal | null) & {
   /** Default and minimum visible history; use replay lookback: 'all' for full history. */
   readonly lookback?: number;

@@ -2,8 +2,10 @@
 
 This toolkit supplies shared infrastructure for independent experiment agents.
 Rule strategies and ML predictions emit target positions through independently
-supplied information and execution adapters. The shipped execution venues and
-low-level `Backtest` use the Bend cash model. See [ADAPTERS.md](ADAPTERS.md).
+supplied information and execution adapters. The cash execution venues and
+low-level `Backtest` use the Bend cash model. `DerivativeExecutionVenue`
+adds linear/inverse futures and perpetual accounting through the same interface.
+See [ADAPTERS.md](ADAPTERS.md) and [DERIVATIVES.md](DERIVATIVES.md).
 A queue worker can also call another simulator, but its results then have that
 simulator's verification boundary; the Bend proof claim does not transfer to it.
 
@@ -38,6 +40,7 @@ Intentional identity collisions fail rather than silently replacing old evidence
 | `src/framework.mjs` | Exact event replay, ledger, fills and checkpoints |
 | `src/information-source.mjs`, `src/replay.mjs` | Information observations and independent source/venue composition |
 | `src/execution-venue.mjs`, `src/bar-execution-venue.mjs` | Venue-owned quote/bar execution, costs, liquidity and valuation |
+| `src/derivative-data.mjs`, `src/derivative-execution-venue.mjs` | Normalized linear/inverse futures/perpetual data, signed positions, funding, margin, liquidation and expiry |
 | `src/policies.mjs` | Bend-backed lot caps, data-role gates, label cutoff and deployment checks; exact affordable-lot division |
 | `src/data.mjs` | Strict quote CSV ingestion, explicit units, chronology checks, deterministic synthetic fixtures |
 | `src/strategies.mjs` | Target-position signals, buy-and-hold, moving-average crossover, mean reversion |

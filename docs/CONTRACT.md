@@ -2,6 +2,12 @@
 
 ## Domain
 
+This section describes the original cash `Backtest` and its quote/bar venues.
+The separate `DerivativeExecutionVenue` has the input domain, accounting,
+rounding and verification scope in [DERIVATIVES.md](DERIVATIVES.md). It reuses
+Bend order primitives and adds two wallet-posting laws without widening the cash
+engine's admission rules. The complete specification now contains 27 laws.
+
 One configured spot instrument and quote currency; zero initial inventory; positive initial cash; no borrowing or leverage. All lots are indivisible. Cash, prices and fees are quote minor units. The fixed fee is nonnegative and charged per filled lot once. A sale limit below the per-lot fee is rejected. Sell proceeds are immediately usable by subsequent events. No corporate actions, funding, deposits, withdrawals, delistings or settlement events are modeled; adding them requires new typed events and postings.
 
 Bend's mathematical `Nat` is exact and unbounded in these laws, but its pinned JavaScript backend checks a `2^48 - 1` immediate bound. The adapter restricts input integers and relevant computed values to that bound, uses BigInt for reconciliation, and converts runtime arithmetic failure to a typed error. `Nat.sub` saturates: the pure low-level posting functions therefore require sufficient cash/inventory. The admitted-state invariants, runtime reconciler and tests establish those preconditions for the public framework path. Never use `Engine.buy` or `Engine.sell` directly on unchecked data.

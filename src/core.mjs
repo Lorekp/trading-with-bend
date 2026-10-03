@@ -14,6 +14,11 @@ export function nat(value, name, positive = false) {
   requireThat(n <= MAX_NAT && (!positive || n > 0n), 'INTEGER_RANGE', `${name} outside ${positive ? 1 : 0}..2^48-1`);
   return n;
 }
+export function integer(value, name) {
+  requireThat(typeof value === 'string' && /^(0|-?[1-9][0-9]*)$/.test(value), 'INVALID_INTEGER', `${name} must be a canonical signed decimal string`);
+  nat(value.startsWith('-') ? value.slice(1) : value, name);
+  return BigInt(value);
+}
 export function checked(n, name) {
   requireThat(n >= 0n && n <= MAX_NAT, 'ARITHMETIC_RANGE', `${name} outside 0..2^48-1`);
   return n;

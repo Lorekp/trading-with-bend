@@ -1,4 +1,4 @@
-import { hash, nat, requireThat, freeze as freezeData } from './core.mjs';
+import { hash, integer, requireThat, freeze as freezeData } from './core.mjs';
 import { validateInstrument, validateObservation } from './information-source.mjs';
 
 const usedVenues = new WeakSet();
@@ -47,7 +47,7 @@ export function runStrategy(informationSource, executionVenue, strategy, options
       time, index: count - 1, tickCount: count, account, ledger: account.ledger, orders: account.orders, equity: account.equity });
     const target = strategy(context);
     requireThat(target === null || typeof target === 'string', 'STRATEGY_OUTPUT', 'Strategy must return canonical target lots or explicit null');
-    if (target !== null) { nat(target, 'strategy target'); executionVenue.setTarget(target, time); }
+    if (target !== null) { integer(target, 'strategy target'); executionVenue.setTarget(target, time); }
     targets.push({ time, target });
   }
   const endTime = previous === null ? null : String(previous);
