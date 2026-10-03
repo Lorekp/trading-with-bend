@@ -14,6 +14,9 @@ For a small forecasting example, see [the optional ML guide](docs/FORECASTING.md
 research splits and registry, leaves final data unreleased, and requires the
 separate Python dependencies in `requirements-ml.txt`.
 
+For memory measurement, see the [benchmark research](docs/MEMORY_BENCHMARK_RESEARCH.md)
+and [benchmark design](docs/MEMORY_BENCHMARK_DESIGN.md).
+
 Each replay handles one instrument with integer lots and ordinary limit orders. Cash quote/bar venues and a separate derivative venue have explicit accounting and execution assumptions. It is a reference simulator, not a claim about market realism or profitable strategies.
 
 ## Run it
@@ -125,7 +128,24 @@ const simulated = runStrategy(source, venue, ({ history }) =>
 
 Build evidence is bound to hashes of the Bend sources and generated modules; stale builds cannot start a backtest. Provenance is captured for the loaded implementation and remains stable throughout a run. Builds hold an exclusive lock and reject source changes during verification. For large runs, use `runStrategy(source, venue, strategy, { lookback: 64 })` and configure the venue with `{ traceMode: 'compact', orderStorage: 'active' }`. The ETH bridge uses bounded history, compact recording and active storage by default, retaining all fills and final order records.
 
-Profile the same workload in fresh processes to compare memory and disk recording:
+Measure complete workloads in fresh process groups:
+
+```powershell
+npm run benchmark:memory -- --suite smoke-v1 --output output/memory/smoke
+npm run benchmark:memory -- --suite replay-v1 --ticks 250000 --repetitions 7 --output output/memory/replay
+npm run benchmark:memory -- --suite controls-v1 --ticks 250000 --output output/memory/controls
+```
+
+Use new output directories. The benchmark records preparation separately, observes
+the supervisor and all descendants through reporting and registry publication,
+and retains each repetition's plan, logs, timeline, phase memory and complete audit.
+Windows uses a Job Object committed-memory high water; Linux requires delegated
+cgroup v2 access and uses charged-memory high water. Sampled RSS/working set is a
+separate explanatory metric. See [the benchmark guide](docs/MEMORY_BENCHMARK.md).
+The [measured results](docs/MEMORY_BENCHMARK_RESULTS.md) record repeated
+two-million-quote serial and five-worker runs on Windows.
+
+Measure paired execution speed in fresh processes:
 
 ```powershell
 npm run benchmark -- --profile smoke
@@ -158,15 +178,13 @@ fresh processes, representative workloads, correctness gates and uncertainty.
 For five concurrent tick workers sharing one admitted dataset:
 
 ```powershell
-$env:NODE_OPTIONS='--max-old-space-size=128'
-node scripts/benchmark-campaign.mjs --ticks 2000000 --workers 5 --order-every 32 --output output/tick-capacity
+npm run benchmark:memory -- --suite campaign-v1 --ticks 2000000 --workers 5 --jobs 5 --order-every 32 --node-options '--max-old-space-size=128' --output output/memory/campaign
 ```
 
 This creates registered worker attempts, complete disk audits and a summary
-with admission, campaign and verification timings, disk bytes, per-worker peak
-RSS and exact ledger/trace identities. Use `--dataset path/to/manifest.json`
-to reuse prepared quotes (also supply their `--ticks` count), `--profile` to
-capture the first worker's CPU profile, and fresh output paths for comparisons.
+with full-group peaks, run dispersion and exact ledger/trace identities.
+Use `--dataset path/to/manifest.json` to reuse prepared quotes (also supply their
+`--ticks` count). Keep `--jobs` fixed when comparing `--workers` concurrency.
 Default event spacing is one millisecond; calendar coverage does not determine
 tick capacity. The workload models top-of-book execution, not full depth/queue
 matching. Larger information payloads and model-training memory need their own

@@ -32,10 +32,12 @@ they do not establish perpetual funding, margin or queue realism.
   preparation, replay, reporting and finalization, but rounds times to integer
   milliseconds, has no repeated comparison, and allows profiling during timing.
   Venue construction and source setup are included in its `replayMs`.
-- `scripts/benchmark-campaign.mjs` and `experiments/scaling/worker.mjs` reuse
+- The former `scripts/benchmark-campaign.mjs` and `experiments/scaling/worker.mjs` reused
   admitted disk quotes, use the experiment registry, preserve audits, and report
   campaign timings. They measure capacity under configured contention. Worker
   timings exclude process startup; the campaign has no repeated paired estimate.
+  The memory benchmark now covers this workload through `npm run benchmark:memory`
+  with `--suite campaign-v1`; see [its guide](MEMORY_BENCHMARK.md).
 - The current constant-price fixtures compress unusually well. A fixed total
   `--orders` while increasing `--ticks` also reduces trading density. Neither
   dimension alone represents a general replay workload.

@@ -21,7 +21,8 @@
     "derivatives-demo": "node scripts/build.mjs && node examples/derivatives.mjs",
     "eth-demo": "node scripts/build.mjs && node scripts/eth-campaign.mjs",
     "ml-demo": "node scripts/build.mjs && node examples/eth-forecast.mjs",
-    "benchmark": "node scripts/benchmark.mjs"
+    "benchmark": "node scripts/benchmark.mjs",
+    "benchmark:memory": "node scripts/benchmark-memory.mjs"
   },
   "dependencies": {
     "tar-stream": "3.2.2",
