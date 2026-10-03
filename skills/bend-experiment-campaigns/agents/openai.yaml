@@ -1,0 +1,3 @@
+interface:
+  display_name: "Bend Experiment Campaigns"
+  short_description: "Run reproducible registered experiment campaigns"
