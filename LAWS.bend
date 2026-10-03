@@ -190,3 +190,34 @@ law working_orders_keep_fifo:
   for tail: List<&2, E.Order>
   {E.working_orders(Con{E.Order{id, side, limit, accepted, 1n+remaining, filled, cancelled, decision, arrival, cancel_at}, tail})
     == Con{E.Order{id, side, limit, accepted, 1n+remaining, filled, cancelled, decision, arrival, cancel_at}, E.working_orders(tail)} : List<&2, E.Order>}
+
+# Market-data admission and as-of visibility; these do not prove vendor fidelity.
+law future_market_data_is_hidden:
+  for decision: Nat
+  for delay: Nat
+  {P.data_visible(1n+Nat.add(decision, delay), decision) == False{} : Bool}
+
+law published_market_data_is_visible:
+  for available: Nat
+  for delay: Nat
+  {P.data_visible(available, Nat.add(available, delay)) == True{} : Bool}
+
+law zero_bid_is_not_a_quote:
+  for ask: Nat
+  for bid_size: Nat
+  for ask_size: Nat
+  {P.valid_quote(0n, ask, bid_size, ask_size) == False{} : Bool}
+
+law locked_or_crossed_quotes_are_rejected:
+  for +ask: Nat
+  for +delay: Nat
+  for bid_size: Nat
+  for ask_size: Nat
+  {P.valid_quote(Nat.add(ask, delay), ask, bid_size, ask_size) == False{} : Bool}
+
+law positive_uncrossed_quotes_are_accepted:
+  for bid: Nat
+  for spread: Nat
+  for bid_size: Nat
+  for ask_size: Nat
+  {P.valid_quote(1n+bid, 2n+Nat.add(bid, spread), 1n+bid_size, 1n+ask_size) == True{} : Bool}
