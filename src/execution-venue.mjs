@@ -8,6 +8,7 @@ import { affordableLots, cappedLots } from './policies.mjs';
 export class QuoteExecutionVenue {
   #iterator; #next; #hasTickId; #time = null; #quote = null; #sequence = 0n; #orderId = 0n;
   #maxPositionLots; #finished = false; #terminalSequence; #submitAtEnd;
+  #snapshot; #snapshotLedger; #snapshotOrders; #projectedOrders;
   constructor(options) {
     requireThat(options && Object.keys(options).every(key => ['id', 'config', 'ticks', 'maxPositionLots', 'traceMode', 'orderStorage', 'submitAtEnd', 'auditDirectory'].includes(key)), 'VENUE_OPTION', 'Unknown quote execution option');
     const { id, config, ticks, maxPositionLots, traceMode, orderStorage, submitAtEnd = true, auditDirectory } = options;
@@ -51,12 +52,18 @@ export class QuoteExecutionVenue {
     this.#time = now;
   }
   snapshot() {
-    const ledger = this.backtest.ledger, mark = this.backtest.mark;
+    const ledger = this.backtest.ledger, mark = this.backtest.mark, orders = this.backtest.workingOrders;
     const stale = !mark || this.#time - mark.time > BigInt(this.backtest.config.maxQuoteAgeMs);
-    return freezeData({ ledger: { cash: ledger.cash, quantity: ledger.quantity },
-      orders: this.backtest.workingOrders.map(order => ({ id: order.id, side: order.side.$ === 'Buy' ? 'buy' : 'sell',
-        limit: order.limit, remaining: order.remaining, cancellationPending: order.cancel_at.$ === 'Some' })),
-      equity: ledger.quantity > 0n && stale ? null : ledger.cash + ledger.quantity * (mark?.price ?? 0n),
+    const equity = ledger.quantity > 0n && stale ? null : ledger.cash + ledger.quantity * (mark?.price ?? 0n);
+    // Backtest reuses exactly equal immutable state. Quotes and clocks that do
+    // not change this account need no new callback snapshot or order projection.
+    if (this.#snapshotLedger === ledger && this.#snapshotOrders === orders && this.#snapshot?.equity === equity) return this.#snapshot;
+    if (this.#snapshotOrders !== orders) this.#projectedOrders = freezeData(orders.map(order => ({
+      id: order.id, side: order.side.$ === 'Buy' ? 'buy' : 'sell', limit: order.limit,
+      remaining: order.remaining, cancellationPending: order.cancel_at.$ === 'Some' })));
+    this.#snapshotLedger = ledger; this.#snapshotOrders = orders;
+    return this.#snapshot = freezeData({ ledger: { cash: ledger.cash, quantity: ledger.quantity },
+      orders: this.#projectedOrders, equity,
       funding: { status: 'unsupported', accrued: null }, margin: { model: 'cash-only', leverage: false } });
   }
   setTarget(target, time) { this.reconcileTarget(target, time, this.#quote); }

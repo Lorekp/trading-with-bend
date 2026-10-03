@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { BacktestError, MAX_NAT } from '../src/core.mjs';
 import { QUOTE_UNITS, parseQuoteCsv, syntheticQuotes, validateTicks } from '../src/data.mjs';
 import { targetPosition, buyAndHold, movingAverageCrossover, meanReversion } from '../src/strategies.mjs';
+import { QuoteExecutionVenue } from '../src/execution-venue.mjs';
 
 const instrument = { symbol: 'TEST', currency: 'EUR', priceTick: '1', lotSize: '1' };
 const config = (extra = {}) => ({ instrument, initialCash: '1000', feePerLot: '1', orderLatencyMs: '0', cancelLatencyMs: '0', maxQuoteAgeMs: '100',
@@ -14,6 +15,43 @@ const errorCode = code => error => error instanceof BacktestError && error.code 
 const mapping = { time: 'timestamp', bid: 'bid', ask: 'ask', bidLots: 'bid_depth', askLots: 'ask_depth' };
 const csvOptions = (extra = {}) => ({ instrument, columns: mapping, units: QUOTE_UNITS, ...extra });
 const header = 'timestamp,bid,ask,bid_depth,ask_depth';
+
+test('quote account snapshots remain immutable through orders, fills, marks and stale clocks', () => {
+  const venue = new QuoteExecutionVenue({ id: 'snapshot', config: config({ maxQuoteAgeMs: '2', cancelLatencyMs: '2' }),
+    ticks: ticks([100, 100, 101, 101], '1'), maxPositionLots: '10', traceMode: 'compact' });
+  venue.advanceTo('0');
+  const empty = venue.snapshot();
+  assert.equal(venue.snapshot(), empty);
+  venue.setTarget('2', '0');
+  const submitted = venue.snapshot();
+  assert.equal(submitted.orders[0].remaining, 2n);
+  venue.advanceTo('1');
+  const partial = venue.snapshot();
+  assert.equal(partial.ledger.quantity, 1n); assert.equal(partial.orders[0].remaining, 1n);
+  assert.equal(partial.equity, 998n);
+  venue.setTarget('0', '1');
+  const cancelled = venue.snapshot();
+  assert.equal(cancelled.orders[0].cancellationPending, true);
+  assert.equal(partial.orders[0].cancellationPending, false);
+  venue.advanceTo('2');
+  const marked = venue.snapshot();
+  assert.equal(marked.equity, 999n);
+  assert.equal(marked.orders, cancelled.orders);
+  venue.advanceTo('3');
+  const closed = venue.snapshot();
+  assert.equal(closed.orders.length, 0);
+  venue.advanceTo('4'); assert.equal(venue.snapshot(), closed);
+  venue.advanceTo('6'); const stale = venue.snapshot();
+  assert.equal(stale.equity, null); assert.equal(closed.equity, 999n);
+  assert.equal(stale.orders, closed.orders);
+  assert.deepEqual(empty.ledger, { cash: 1000n, quantity: 0n });
+  assert.equal(empty.orders.length, 0); assert.equal(submitted.orders[0].remaining, 2n);
+  for (const snapshot of [empty, submitted, partial, cancelled, marked, closed, stale]) {
+    assert.ok(Object.isFrozen(snapshot) && Object.isFrozen(snapshot.ledger) && Object.isFrozen(snapshot.orders));
+    assert.throws(() => { snapshot.ledger.cash = 0n; }, TypeError);
+  }
+  venue.finish('6');
+});
 
 test('CSV handles quoted headers, escaped delimiters, multiline IDs, BOM and CRLF exactly', () => {
   const csv = '\ufeff"timestamp","bid","ask","bid_depth","ask_depth","identity"\r\n0,99,100,2,3,"vendor, ""one"""\r\n1,100,101,4,5,"line\nidentifier"\r\n';

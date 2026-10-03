@@ -16,6 +16,7 @@ import { runStrategy } from '../../src/replay.mjs';
 import { mkdirSync } from 'node:fs';
 import { loadBinanceBars, loadBinanceSeries } from '../../src/binance-bars.mjs';
 import { downloadHyperliquid, monthWindow, candleCoverage, validateFunding } from '../../scripts/download-hyperliquid.mjs';
+import { canonical } from '../../src/core.mjs';
 
 const HEADER = 'open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore';
 const code = expected => error => error.code === expected;
@@ -333,6 +334,57 @@ test('Binance and OKX archives publish the same canonical bars through the same 
   await assert.rejects(prepareMarketData({ source: await openMarketSource({ ...okx, publicationDelayMs: '1' }), outputDirectory: okx.outputDirectory }), code('DATA_OUTPUT_EXISTS'));
   const shard = join(okx.outputDirectory, left.files[0].path), bytes = readFileSync(shard); bytes[20] ^= 1; writeFileSync(shard, bytes);
   await assert.rejects(collect(readProcessedData(options)), code('ARCHIVE_INTEGRITY'));
+});
+
+test('prepared order-book information streams wide immutable observations across chunks and independent cursors', async t => {
+  const parent = resolve(tmpdir()), directory = mkdtempSync(join(parent, 'bend-book-information-'));
+  t.after(() => { assert.equal(dirname(directory), parent); rmSync(directory, { recursive: true, force: true }); });
+  const instrument = { symbol: 'ETHUSDT', currency: 'USDT', lotSize: '0.001' }, count = 1025;
+  const observation = index => ({ time: String(index * 10), availableAt: String(index * 10 + 2), data: {
+    sequence: String(index + 1),
+    bids: Array.from({ length: 50 }, (_, level) => [String(2000000 - level), String(1 + (index + level) % 17)]),
+    asks: Array.from({ length: 50 }, (_, level) => [String(2000001 + level), String(1 + (index * 3 + level) % 19)]),
+  } });
+  const expected = createHash('sha256').update('['), shared = observation(0);
+  const input = (async function* () {
+    for (let index = 0; index < count; index++) {
+      const next = observation(index);
+      shared.time = next.time; shared.availableAt = next.availableAt; shared.data.sequence = next.data.sequence;
+      for (const side of ['bids', 'asks']) for (let level = 0; level < 50; level++) shared.data[side][level][1] = next.data[side][level][1];
+      if (index) expected.update(','); expected.update(canonical(next));
+      yield shared; // A reusable vendor buffer must be copied on admission.
+    }
+    shared.data.bids[0][1] = '999999';
+  })();
+  const source = await prepareInformationSource({ id: 'book-depth', instrument, observations: input, directory: join(directory, 'admitted') });
+  const expectedHash = expected.update(']').digest('hex'), audit = source.manifest.audit;
+  try {
+    assert.equal(source.manifest.observationsHash, expectedHash);
+    assert.equal(source.manifest.datasetHash, expectedHash);
+    assert.equal(audit.streams.observations.count, count);
+    const first = source.observations(), second = source.observations();
+    try {
+      const retained = first.next().value;
+      assert.deepEqual(retained, observation(0));
+      assert.ok(Object.isFrozen(retained.data.bids) && Object.isFrozen(retained.data.bids[0]));
+      assert.throws(() => { retained.data.bids[0][1] = '0'; }, TypeError);
+      assert.deepEqual(first.next().value, observation(1));
+      first.return(); // Closing a partial cursor leaves other cursors usable.
+      assert.deepEqual(second.next().value, observation(0));
+      assert.deepEqual(retained, observation(0));
+    } finally { first.return(); second.return(); }
+    let index = 0;
+    for (const row of source.observations()) assert.deepEqual(row, observation(index++));
+    assert.equal(index, count);
+  } finally { source.close(); }
+  const reopened = openPreparedInformationSource(audit.manifestPath);
+  try {
+    assert.equal(reopened.manifest.observationsHash, expectedHash);
+    const cursor = reopened.observations();
+    assert.deepEqual(cursor.next().value, observation(0));
+    reopened.close();
+    assert.throws(() => cursor.next(), code('INFORMATION_CLOSED'));
+  } finally { reopened.close(); }
 });
 
 test('prepared information never publishes an invalid or interrupted observation stream', async t => {

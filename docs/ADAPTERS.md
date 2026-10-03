@@ -212,3 +212,27 @@ directory is supplied. Failures abort disk recording; an incomplete attempt has
 no completed manifest. Retain both the manifest and its database when moving or
 archiving evidence. Filesystem storage and SQLite are tested host implementation,
 outside the Bend proof scope.
+
+The current `bend-replay-audit-v2` format stores chronological streams in
+compressed chunks, while exact event/order identity indexes stay on disk.
+Chunks target at most 512 records or 256 KiB of canonical record bytes; an
+individual larger observation may exceed that byte target. Pending chunks and
+SQLite transactions are flushed before checkpoints and final publication. Any
+write failure still aborts the whole recording. Logical records, ordering and
+canonical hashes are independent of the physical chunk layout. Read v1 audit
+files with the original toolkit; prepare new datasets for this format.
+
+For concurrent tick research, admit the dataset once before enqueueing jobs.
+Declare both its manifest and database as experiment dependencies. Each worker
+opens its own read-only admitted dataset and owns a separate `auditDirectory`;
+reuse the opened dataset across that worker's trials, then close it. Do not copy
+the same source database into every attempt or request full reports in the
+normal campaign path. Queue concurrency is per runner, so five independent
+agents should coordinate the total number of worker processes on the host.
+
+Capacity is measured in events and bytes per observation, not calendar years.
+The quote execution model consumes top-of-book prices and sizes. Full depth
+observations can be prepared as information, but this does not implement depth
+matching, queue position or exchange microstructure. Array-backed bar and
+derivative inputs remain memory-resident. Public array getters, full reports,
+and full-prefix checkpoints retain their explicitly documented costs.

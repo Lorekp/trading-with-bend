@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hash, json, nat, requireThat } from './core.mjs';
+import { CanonicalArrayHash, hash, json, nat, requireThat } from './core.mjs';
 import { trainingAllowed, canReadPartition } from './policies.mjs';
 
 const frozenCopy = value => {
@@ -49,17 +49,37 @@ export function walkForwardSplits(samples, { trainSize, validationSize, stepSize
 
 /** No final partition is exposed here. Final release must use withFinalHoldout. */
 export function foldRows(samples, plan, foldId, role, partition) {
-  requireThat(hash(samples) === plan.datasetHash, 'DATASET_MISMATCH', 'Split plan belongs to different data');
   requireThat(partition !== 'final' && canReadPartition(role, partition), 'PARTITION_DENIED', 'Role cannot read requested partition');
+  const verified = verifySplitPlan(samples, plan);
+  return splitPartition(samples, verified, hash(verified), foldId, partition);
+}
+
+function verifySplitPlan(samples, plan) {
+  requireThat(hash(samples) === plan.datasetHash, 'DATASET_MISMATCH', 'Split plan belongs to different data');
   // Regenerate the plan rather than trusting caller-modified indices/hashes.
   const verified = walkForwardSplits(samples, plan.options);
   requireThat(hash(verified) === hash(plan), 'SPLIT_TAMPER', 'Split indices or options changed after planning');
-  const fold = verified.folds.find(f => f.id === foldId);
+  return verified;
+}
+
+function splitPartition(samples, plan, planHash, foldId, partition) {
+  const fold = plan.folds.find(f => f.id === foldId);
   requireThat(fold, 'UNKNOWN_FOLD', `Unknown fold ${foldId}`);
-  const planHash = hash(verified);
-  return partitionArtifact({ origin: 'split', datasetHash: verified.datasetHash, planHash, foldId,
+  return partitionArtifact({ origin: 'split', datasetHash: plan.datasetHash, planHash, foldId,
     fold: hash({ planHash, foldId }), cutoff: fold.cutoff, partition,
     rows: fold[partition].map(index => ({ ...samples[index], partition })) });
+}
+
+// Study-owned immutable admission. No cache of caller-owned arrays survives a
+// study, and callbacks cannot mutate future partitions while the study awaits.
+export function admitSplitPlan(samples, plan) {
+  const rows = frozenCopy(samples), verified = verifySplitPlan(rows, plan), planHash = hash(verified);
+  return Object.freeze({ plan: verified, planHash,
+    foldRows(foldId, role, partition) {
+      requireThat(partition !== 'final' && canReadPartition(role, partition), 'PARTITION_DENIED', 'Role cannot read requested partition');
+      return splitPartition(rows, verified, planHash, foldId, partition);
+    },
+  });
 }
 
 function partitionArtifact(body) {
@@ -132,25 +152,53 @@ export async function withFinalHoldout(directory, { holdoutId, strategyHash, pro
 
 /** Explicit regular sampling for numerical research metrics, from ledger valuations. */
 export function regularReturns(report, { intervalMs, periodsPerYear } = {}) {
-  const interval = nat(intervalMs, 'intervalMs', true);
-  requireThat(Number.isFinite(periodsPerYear) && periodsPerYear > 0, 'METRIC_CONVENTION', 'Provide a positive annualization frequency');
-  requireThat(report.status === 'valid-under-declared-model' && report.dataQuality.status === 'accepted', 'INVALID_REPORT', 'Cannot compute ordinary metrics from an invalid report');
-  const observations = report.valuations;
-  requireThat(Array.isArray(observations), 'INVALID_REPORT', 'Valuations required');
-  for (const row of observations) { nat(row.time, 'valuation.time'); nat(row.equity, 'valuation.equity'); }
-  const returns = [];
-  for (let i = 1; i < observations.length; i++) {
-    requireThat(BigInt(observations[i].time) - BigInt(observations[i - 1].time) === interval, 'IRREGULAR_SAMPLING', 'Every valuation must lie on the declared regular grid; resampling must be explicit');
-    const before = BigInt(observations[i - 1].equity), after = BigInt(observations[i].equity);
-    requireThat(before > 0n && after >= 0n, 'UNDEFINED_RETURN', 'Return requires positive starting equity and nonnegative ending equity');
-    returns.push(Number(after - before) / Number(before));
-  }
+  requireThat(Array.isArray(report.valuations), 'INVALID_REPORT', 'Valuations required');
+  const returns = [...regularReturnValues(report, { intervalMs, periodsPerYear })];
   if (returns.length < 2) return { returns, sharpe: null, reason: 'Fewer than two return observations', intervalMs, periodsPerYear };
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((sum, r) => sum + (r - mean) ** 2, 0) / (returns.length - 1);
   const sharpe = variance === 0 ? null : mean / Math.sqrt(variance) * Math.sqrt(periodsPerYear);
   requireThat(sharpe === null || Number.isFinite(sharpe), 'NUMERICAL_METRIC', 'Metric overflow');
   return { returns, sharpe, reason: sharpe === null ? 'Zero sample variance' : null, intervalMs, periodsPerYear, convention: 'Arithmetic returns; sample standard deviation; zero risk-free rate; excludes unsampled initial-to-first-quote period', numericalStatus: 'Floating-point research metric, not formally proved' };
+}
+
+function* regularReturnValues(report, { intervalMs, periodsPerYear }) {
+  const interval = nat(intervalMs, 'intervalMs', true);
+  requireThat(Number.isFinite(periodsPerYear) && periodsPerYear > 0, 'METRIC_CONVENTION', 'Provide a positive annualization frequency');
+  requireThat(report.status === 'valid-under-declared-model' && report.dataQuality.status === 'accepted', 'INVALID_REPORT', 'Cannot compute ordinary metrics from an invalid report');
+  requireThat(report.valuations && typeof report.valuations[Symbol.iterator] === 'function', 'INVALID_REPORT', 'Valuations required');
+  let previous = null;
+  for (const row of report.valuations) {
+    const time = nat(row.time, 'valuation.time'), equity = nat(row.equity, 'valuation.equity');
+    if (previous) {
+      requireThat(time - previous.time === interval, 'IRREGULAR_SAMPLING', 'Every valuation must lie on the declared regular grid; resampling must be explicit');
+      requireThat(previous.equity > 0n, 'UNDEFINED_RETURN', 'Return requires positive starting equity and nonnegative ending equity');
+      yield Number(equity - previous.equity) / Number(previous.equity);
+    }
+    previous = { time, equity };
+  }
+}
+
+// Internal study seam: retain the identity and numerical summary, while the
+// complete valuation evidence remains in the replay report/audit.
+export function summarizeRegularReturns(report, { intervalMs, periodsPerYear } = {}) {
+  const digest = new CanonicalArrayHash();
+  let count = 0, mean = 0, m2 = 0;
+  for (const value of regularReturnValues(report, { intervalMs, periodsPerYear })) {
+    requireThat(Number.isFinite(value), 'NUMERICAL_METRIC', 'Metric overflow');
+    digest.push(value);
+    const delta = value - mean;
+    mean += delta / ++count;
+    m2 += delta * (value - mean);
+  }
+  const variance = count < 2 ? null : m2 / (count - 1);
+  const sharpe = variance === null || variance === 0 ? null : mean / Math.sqrt(variance) * Math.sqrt(periodsPerYear);
+  requireThat(Number.isFinite(mean) && (variance === null || Number.isFinite(variance)) && (sharpe === null || Number.isFinite(sharpe)), 'NUMERICAL_METRIC', 'Metric overflow');
+  return { count, returnsHash: digest.digest(), mean: count ? mean : null, variance, sharpe,
+    reason: count < 2 ? 'Fewer than two return observations' : sharpe === null ? 'Zero sample variance' : null,
+    intervalMs, periodsPerYear,
+    convention: 'Arithmetic returns; sample standard deviation; zero risk-free rate; excludes unsampled initial-to-first-quote period',
+    accumulation: 'Welford online mean and sample variance', numericalStatus: 'Floating-point research metric, not formally proved' };
 }
 
 /** Comparison keeps failed/invalid trials visible and never silently ranks final results. */

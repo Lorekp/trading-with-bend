@@ -284,6 +284,13 @@ buy-and-hold. Optional `metadata` records fitted model or regression evidence.
 The factory must use the same data, instrument, execution configuration and
 model for candidate and baselines. It must create a fresh account every time.
 
+Study admission takes an immutable snapshot of the samples and verifies the full
+split plan once, before invoking any callback. Later folds use that admitted
+snapshot, including across asynchronous preparation; mutating the caller's rows
+or plan cannot change a running study. Standalone `foldRows` continues to verify
+its inputs on every call. Samples and split indices still occupy memory: this
+removes repeated admission work, not the need to bound the training population.
+
 The protocol is explicit:
 
 ```js
@@ -310,6 +317,17 @@ inside the evaluation window, and deficit accounts are rejected. There is no
 interpolation. File-recorded valuations are read incrementally. The resulting
 sample array is proportional to the requested grid, not to market-event count.
 `regularReturns` retains its stricter pure interface and never resamples implicitly.
+
+Inside `evaluateStudy`, sampling and arithmetic-return calculation stream through
+constant-size accumulators. Each fold's metrics retain `count`, `returnsHash`,
+mean, sample variance and Sharpe, rather than the sampled-equity and return arrays.
+Complete valuations remain in the report or immutable disk audit. The summary
+uses Welford's online mean and variance; floating-point rounding can differ from
+`regularReturns`' two-pass calculation. Its convention is recorded in
+`metrics.accumulation`. Explicit `sampleEquity` and `regularReturns` calls still
+return arrays when those individual values are needed. Market-event count and
+sampling-grid length are separate scale measures; neither is inferred from the
+calendar length of a study.
 
 Study aggregation sums independent-fold P&L and divides by their summed initial
 capital. It records exact rational excess returns against each baseline and
