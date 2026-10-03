@@ -122,8 +122,9 @@ shape and horizon. Mixing rows from another target contract is rejected even
 when feature schemas match. This records the caller's declared target; it does
 not attest to the origin of vendor prices.
 
-For final metrics, freeze the model/protocol and obtain final rows only inside
-`withFinalHoldout`; the demo never consumes that gate. As elsewhere in this
+For final metrics, freeze the model/protocol and use the released partition's
+`evaluation.rows` inside `withFinalHoldout(directory, input, (evaluation, claim) => ...)`;
+the demo never consumes that gate. As elsewhere in this
 toolkit, the gate is cooperative, not a sandbox against direct data access.
 
 ## Model defaults and checks

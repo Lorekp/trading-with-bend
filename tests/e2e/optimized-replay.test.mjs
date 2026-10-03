@@ -1,4 +1,3 @@
-import { targetOrders } from '../../src/target-orders.mjs';
 import { replayQuotes as runStrategy } from '../replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -57,7 +56,7 @@ function legacyRunStrategy(configuration, quotes, onTick) {
     run.step({ ...tick, sequence: String(++sequence) }); history.push(structuredClone(tick));
     const context = deepFreeze({ history: structuredClone(history), ledger: structuredClone(run.state.ledger), orders: structuredClone(orders(run.state)) });
     const target = onTick(context);
-    const decisions = target === null ? [] : targetOrders(target, { feePerLot: configuration.feePerLot, maxPositionLots: String(MAX_NAT) })(context);
+    const decisions = target === null ? [] : referenceTargetOrders(target, configuration.feePerLot, context);
     for (const decision of decisions) {
       const event = { ...decision, id: `strategy-${++sequence}`, time: tick.time, sequence: String(sequence), symbol: configuration.instrument.symbol, currency: configuration.instrument.currency };
       if (decision.type === 'submit') event.orderId = String(++orderId);
@@ -65,6 +64,29 @@ function legacyRunStrategy(configuration, quotes, onTick) {
     }
   }
   return run;
+}
+
+// Independent exact-arithmetic oracle: do not use production reconciliation or sizing.
+function referenceTargetOrders(target, feePerLot, { ledger, orders, history }) {
+  const desired = BigInt(target) < MAX_NAT ? BigInt(target) : MAX_NAT;
+  const delta = desired - ledger.quantity, side = delta > 0n ? 'buy' : 'sell';
+  const distance = delta < 0n ? -delta : delta, quote = history.at(-1);
+  const bid = BigInt(quote.bid), ask = BigInt(quote.ask), fee = BigInt(feePerLot);
+  const active = orders.filter(order => order.remaining > 0n);
+  const cancel = order => ({ type: 'cancel', orderId: String(order.id) });
+  if (active.some(order => order.cancel_at.$ === 'Some')) return active.filter(order => order.cancel_at.$ !== 'Some').map(cancel);
+  if (active.length) {
+    const remaining = active.reduce((sum, order) => sum + order.remaining, 0n);
+    const stale = delta === 0n || remaining > distance || active.some(order =>
+      (order.side.$ === 'Buy' ? 'buy' : 'sell') !== side || (side === 'buy' ? order.limit < ask : order.limit > bid));
+    return stale ? active.map(cancel) : [];
+  }
+  const limit = side === 'buy' ? ask : bid;
+  if (delta === 0n || (side === 'sell' && limit < fee)) return [];
+  const budget = side === 'buy' ? ledger.cash / (limit + fee) : ledger.quantity;
+  const headroom = side === 'buy' ? MAX_NAT - ledger.quantity : ledger.quantity;
+  const quantity = [distance, budget, headroom].reduce((a, b) => a < b ? a : b);
+  return quantity === 0n ? [] : [{ type: 'submit', side, limit: String(limit), quantity: String(quantity) }];
 }
 
 test('bounded history preserves a real strategy replay, exact postings, order states, and trace hash', () => {

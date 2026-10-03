@@ -46,7 +46,7 @@ test('walk-forward uses label maturity plus embargo and never includes final ind
 test('persistent holdout release remains consumed when evaluation fails', async () => {
   const root = mkdtempSync(join(tmpdir(), 'bend-holdout-')), plan = walkForwardSplits(samples, options);
   const input = { holdoutId: 'untouched-v1', strategyHash: hash('strategy'), protocol: { metric: 'net-pnl' }, samples, plan };
-  await assert.rejects(withFinalHoldout(root, input, rows => { assert.equal(rows.length, 3); throw new Error('intentional'); }), /intentional/);
+  await assert.rejects(withFinalHoldout(root, input, evaluation => { assert.equal(evaluation.rows.length, 3); throw new Error('intentional'); }), /intentional/);
   await assert.rejects(withFinalHoldout(root, { ...input, strategyHash: hash('changed') }, () => 1), { code: 'FINAL_TEST_REUSE' });
 });
 

@@ -2,13 +2,13 @@ import { replayQuotes as runStrategy } from './replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { computeFeatures } from '../src/features.mjs';
-import { fitRidge, predictRidge } from '../src/models.mjs';
+import { fitRidge, predictRidge, evaluateRegression } from '../src/models.mjs';
 import { targetPosition } from '../src/strategies.mjs';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { hash } from '../src/core.mjs';
-import { foldRows, walkForwardSplits, trainingWindow, withFinalHoldout } from '../src/evaluation.mjs';
+import { foldRows, walkForwardSplits, trainingWindow, evaluationWindow, withFinalHoldout } from '../src/evaluation.mjs';
 import { fitForecast, predictForecast, forecastRuntime } from '../src/forecast.mjs';
 import { enqueueExperiment, runQueue, readExperimentResult, verifyExperimentArtifacts } from '../src/experiments.mjs';
 import { ethForecastData, fixtureBars } from '../experiments/eth-forecast/data.mjs';
@@ -99,7 +99,7 @@ test('forecast adapters train, reload, gate availability, and register all trial
       assert.deepEqual(shifted.model.preprocessing.scales, fitted.zero.preprocessing.scales);
       assert.deepEqual(shifted.model.targetScaler, fitted.zero.targetScaler);
       const claim = { holdoutId: 'forecast-test', strategyHash: hash(fitted), protocol: { models: Object.keys(fitted) }, samples, plan };
-      await withFinalHoldout(join(root, 'holdout'), claim, finalRows => {
+      await withFinalHoldout(join(root, 'holdout'), claim, ({ rows: finalRows }) => {
         for (const model of Object.values(fitted)) {
           const expected = predictForecast({ model, rows: finalRows, schema, contract, runtime });
           const reloaded = predictForecast({ model: JSON.parse(JSON.stringify(model)), rows: finalRows, schema, contract, runtime });
@@ -154,7 +154,7 @@ test('forecast adapters train, reload, gate availability, and register all trial
     }
   });
 
-test('verified split artifacts carry training identity through fitting and reject mixed forecast inputs', () => {
+test('verified split artifacts carry lineage through fitting, evaluation and final release', async () => {
   const schema = [{ name: 'price', source: 'price', kind: 'value', unit: 'ticks' }];
   const features = computeFeatures(Array.from({ length: 12 }, (_, i) => ({ time: String((i + 1) * 10), availableAt: String((i + 1) * 10), values: { price: i + 1 } })), schema);
   const samples = features.map((feature, i) => ({ id: `row-${i}`, time: feature.time, labelAvailableAt: String(BigInt(feature.time) + 1n), feature, target: i + 1 }));
@@ -174,6 +174,61 @@ test('verified split artifacts carry training identity through fitting and rejec
   assert.ok(Number.isFinite(predictRidge({ model, schema, fold: validation.fold, feature: validation.rows[0].feature, decisionTime: validation.rows[0].time }).prediction));
   assert.throws(() => fitRidge({ ...args, training: { ...training, cutoff: '999' } }), { code: 'PARTITION_ARTIFACT' });
   assert.throws(() => fitRidge({ ...args, training: validation }), { code: 'PARTITION_DENIED' });
+  const result = evaluateRegression({ model, evaluation: validation, schema });
+  assert.equal(result.evaluationPartitionHash, validation.hash);
+  assert.equal(result.datasetHash, training.datasetHash); assert.equal(result.planHash, training.planHash);
+  assert.equal(result.fold, training.fold); assert.equal(result.partition, 'validation');
+  assert.deepEqual(evaluateRegression({ model, evaluation: JSON.parse(JSON.stringify(validation)), schema }), result);
+  assert.throws(() => { result.predictions.pop(); }, TypeError);
+  assert.throws(() => evaluateRegression({ model, evaluation: training, schema }), { code: 'EVALUATION_PARTITION' });
+  assert.throws(() => evaluateRegression({ model, evaluation: { ...validation, cutoff: '999' }, schema }), { code: 'PARTITION_ARTIFACT' });
+  assert.throws(() => evaluationWindow(validation.rows, { training }), { code: 'PARTITION_DENIED' });
+  const changedSamples = samples.map(row => ({ ...row, target: row.target + 10 }));
+  const changedPlan = walkForwardSplits(changedSamples, plan.options);
+  const otherPlan = walkForwardSplits(samples, { ...plan.options, embargoMs: '1' });
+  for (const [data, split] of [[changedSamples, changedPlan], [samples, otherPlan]]) {
+    const other = foldRows(data, split, 'fold-1', 'select', 'validation');
+    assert.deepEqual(other.rows.map(row => [row.id, row.partition]), validation.rows.map(row => [row.id, row.partition]));
+    assert.throws(() => evaluateRegression({ model, evaluation: other, schema }), { code: 'FOLD_MISMATCH' });
+  }
+  // Even with identical fold tags, dataset and plan metadata must agree.
+  for (const [key, expected] of [['datasetHash', 'DATASET_MISMATCH'], ['planHash', 'SPLIT_MISMATCH']]) {
+    const { hash: ignored, ...body } = model;
+    body[key] = hash('different-study');
+    assert.throws(() => evaluateRegression({ model: { ...body, hash: hash(body) }, evaluation: validation, schema }), { code: expected });
+  }
+  const parent = resolve('build'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'ridge-holdout-'));
+  const claim = { holdoutId: 'ridge-final', strategyHash: model.hash, protocol: { metric: 'mse' }, samples, plan };
+  try {
+    await withFinalHoldout(root, claim, (evaluation, release) => {
+      assert.equal(evaluation.origin, 'final-holdout');
+      assert.equal(evaluation.releaseHash, hash(release));
+      assert.ok(evaluation.rows.every(row => row.partition === 'final'));
+      assert.throws(() => { evaluation.rows[0].target++; }, TypeError);
+      const final = evaluateRegression({ model, evaluation, schema });
+      assert.equal(final.rowCount, plan.final.length); assert.equal(final.partition, 'final');
+      assert.equal(final.fold, model.fold); assert.equal(final.evaluationPartitionHash, evaluation.hash);
+      assert.equal(final.releaseHash, hash(release));
+      assert.deepEqual(evaluateRegression({ model, evaluation: JSON.parse(JSON.stringify(evaluation)), schema }), final);
+      return final;
+    });
+    await assert.rejects(withFinalHoldout(root, claim, () => assert.fail('Release reused')), { code: 'FINAL_TEST_REUSE' });
+    for (const [data, split, expected] of [[changedSamples, changedPlan, 'DATASET_MISMATCH'], [samples, otherPlan, 'SPLIT_MISMATCH']]) {
+      const input = { ...claim, holdoutId: expected, samples: data, plan: split };
+      await assert.rejects(withFinalHoldout(root, input, evaluation => evaluateRegression({ model, evaluation, schema })), { code: expected });
+      await assert.rejects(withFinalHoldout(root, input, () => ({})), { code: 'FINAL_TEST_REUSE' });
+    }
+    // Online windows have no split-plan identity, but retain chronology and release lineage.
+    const online = fitRidge({ ...args, training: trainingWindow(training.rows, { fold: 'online', cutoff: training.cutoff }) });
+    await withFinalHoldout(root, { ...claim, holdoutId: 'online-final', strategyHash: online.hash }, evaluation => {
+      const final = evaluateRegression({ model: online, evaluation, schema });
+      assert.equal(final.fold, 'online'); assert.equal(final.datasetHash, plan.datasetHash);
+      return final;
+    });
+  } finally {
+    assert.equal(dirname(root), parent); rmSync(root, { recursive: true, force: true });
+  }
 
   const data = ethForecastData(fixtureBars(300), 'synthetic');
   const split = walkForwardSplits(data.samples, { trainSize: 100, validationSize: 30, finalStart: 150, stepSize: 200 });
@@ -184,8 +239,8 @@ test('verified split artifacts carry training identity through fitting and rejec
     assert.throws(() => fitForecast({ ...options, contract: { ...data.contract, ...changed } }), { code: 'FORECAST_TARGET' });
   }
   const other = ethForecastData(fixtureBars(300, 42), 'synthetic');
-  const otherPlan = walkForwardSplits(other.samples, split.options);
-  const otherValidation = foldRows(other.samples, otherPlan, 'fold-1', 'select', 'validation');
+  const otherForecastPlan = walkForwardSplits(other.samples, split.options);
+  const otherValidation = foldRows(other.samples, otherForecastPlan, 'fold-1', 'select', 'validation');
   assert.notEqual(otherValidation.fold, options.training.fold);
   assert.throws(() => fitForecast({ ...options, validation: otherValidation }), { code: 'FOLD_MISMATCH' });
   const changedRows = structuredClone(options.training); changedRows.rows[0].target++;

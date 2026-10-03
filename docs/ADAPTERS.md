@@ -113,6 +113,9 @@ fee schedule, order/cancel latency and capital configuration. No execution quote
 means no fills or marks, even if the information source has prices and volume.
 Stale venue quotes prevent new reconciliation, and stale terminal inventory
 marks invalidate performance through the existing Bend host contract.
+Target reconciliation is private venue implementation: it reads the resolved
+target, venue quote, ledger and working orders directly. Strategy warmup and
+information history remain with the strategy and replay runner.
 
 `BarExecutionVenue` owns its spread, collar, delay, participation and liquidity
 cap. The collar uses its own latest completed close; the opening liquidity budget

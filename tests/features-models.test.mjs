@@ -4,7 +4,7 @@ import { hash } from '../src/core.mjs';
 import { RollingFeatures, featureSchema, computeFeatures, validateFeatureArtifact } from '../src/features.mjs';
 import { fitStandardScaler, transformFeatures, fitRidge, validateRidgeModel, predictRidge, evaluateRegression } from '../src/models.mjs';
 import { stableMean, populationMoments, rootMeanSquare } from '../src/numerics.mjs';
-import { trainingWindow } from '../src/evaluation.mjs';
+import { trainingWindow, evaluationWindow } from '../src/evaluation.mjs';
 
 const schema = [{ name: 'price', source: 'price', kind: 'value', unit: 'ticks' }];
 const observation = (time, price, availableAt = time) => ({ time: String(time), availableAt: String(availableAt), values: { price } });
@@ -169,13 +169,23 @@ test('prediction rejects pre-deployment decisions, unavailable features, wrong f
 test('held-out evaluation matches independent analytic errors without changing parameters', () => {
   const model = fit(), before = JSON.stringify(model);
   const rows = [4, 5].map((price, i) => ({ id: `validation-${i}`, partition: 'validation', feature: feature(i + 7, price), decisionTime: String(i + 7), target: 2 * price + 2, labelAvailableAt: String(i + 8) }));
-  const result = evaluateRegression({ model, rows, schema, fold: 'fold-1', partition: 'validation' });
+  const training = trainingWindow(trainRows(), { fold: 'fold-1', cutoff: '4' });
+  const evaluate = rows => evaluateRegression({ model, evaluation: evaluationWindow(rows, { training }), schema });
+  const result = evaluate(rows);
   near(result.mse, 1); near(result.rmse, 1); near(result.mae, 1);
   assert.equal(JSON.stringify(model), before); assert.equal(result.predictions.length, 2);
-  assert.throws(() => evaluateRegression({ model, rows: trainRows().map(row => ({ ...row, decisionTime: '7' })), schema, fold: 'fold-1', partition: 'validation' }), code('EVALUATION_PARTITION'));
-  assert.throws(() => evaluateRegression({ model, rows: [{ ...rows[0], id: 'train-0' }], schema, fold: 'fold-1', partition: 'validation' }), code('EVALUATION_PARTITION'));
-  assert.throws(() => evaluateRegression({ model, rows: [{ ...rows[0], feature: feature(3, 4) }], schema, fold: 'fold-1', partition: 'validation' }), code('EVALUATION_PARTITION'));
-  assert.throws(() => evaluateRegression({ model, rows, schema, fold: 'fold-1', partition: 'final' }), code('EVALUATION_PARTITION'));
+  assert.equal(result.evaluationPartitionHash, evaluationWindow(rows, { training }).hash);
+  assert.equal(result.planHash, null);
+  assert.throws(() => evaluate(trainRows().map(row => ({ ...row, decisionTime: '7' }))), code('EVALUATION_PARTITION'));
+  assert.throws(() => evaluate([{ ...rows[0], id: 'train-0' }]), code('EVALUATION_PARTITION'));
+  assert.throws(() => evaluate([{ ...rows[0], feature: feature(3, 4) }]), code('EVALUATION_PARTITION'));
+  assert.throws(() => evaluate(rows.map(row => ({ ...row, partition: 'final' }))), code('EVALUATION_PARTITION'));
+  assert.throws(() => evaluate([rows[0], rows[0]]), code('EVALUATION_PARTITION'));
+  assert.throws(() => evaluate([{ ...rows[0], decisionTime: '5' }]), code('MODEL_NOT_AVAILABLE'));
+  assert.throws(() => evaluate([{ ...rows[0], feature: feature(7, 4, 8) }]), code('FEATURE_AVAILABILITY'));
+  const otherTraining = trainingWindow(trainRows([1, 2, 4]), { fold: 'fold-1', cutoff: '4' });
+  assert.throws(() => evaluateRegression({ model, evaluation: evaluationWindow(rows, { training: otherTraining }), schema }), code('EVALUATION_PARTITION'));
+  assert.deepEqual(evaluate(rows.map(({ decisionTime, ...row }) => row)).predictions, result.predictions);
 });
 
 test('nonfinite targets, overflowed features and ill-conditioned arithmetic reject explicitly', () => {
@@ -236,10 +246,11 @@ test('unrepresentable nonzero moments fail explicitly instead of becoming zero',
 });
 
 test('evaluation preserves representable RMSE and explicitly marks unavailable squared metrics', () => {
-  const model = fit({ rows: trainRows([1, 2, 3], () => 0), alpha: 1 });
+  const training = trainingWindow(trainRows([1, 2, 3], () => 0), { fold: 'fold-1', cutoff: '4' });
+  const model = fit({ training, alpha: 1 });
   for (const [magnitude, reason] of [[1e-200, 'underflow'], [1e200, 'overflow'], [1e-160, null], [0, null]]) {
     const rows = [1, -1].map((sign, i) => ({ id: `held-${i}`, partition: 'validation', feature: feature(i + 7, 4 + i), decisionTime: String(i + 7), target: sign * magnitude, labelAvailableAt: String(i + 8) }));
-    const result = evaluateRegression({ model, rows, schema, fold: 'fold-1', partition: 'validation' });
+    const result = evaluateRegression({ model, evaluation: evaluationWindow(rows, { training }), schema });
     assert.equal(result.mseUnavailableReason, reason);
     if (reason) assert.equal(result.mse, null); else assert.equal(result.mse, magnitude * magnitude);
     if (magnitude === 0) { assert.equal(result.rmse, 0); assert.equal(result.mae, 0); }

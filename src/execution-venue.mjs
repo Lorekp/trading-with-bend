@@ -1,12 +1,12 @@
 import { Backtest } from './framework.mjs';
 import { hash, nat, requireThat, freeze as freezeData } from './core.mjs';
 import { validateTicks } from './data.mjs';
-import { targetOrders } from './target-orders.mjs';
+import { affordableLots, cappedLots } from './policies.mjs';
 
 /** Bend cash venue. No InformationSource or source observation enters this module. */
 export class QuoteExecutionVenue {
   #ticks; #tickIds; #cursor = 0; #time = null; #quote = null; #sequence = 0n; #orderId = 0n;
-  #reconcile; #finished = false; #terminalSequence; #submitAtEnd;
+  #maxPositionLots; #finished = false; #terminalSequence; #submitAtEnd;
   constructor(options) {
     requireThat(options && Object.keys(options).every(key => ['id', 'config', 'ticks', 'maxPositionLots', 'traceMode', 'orderStorage', 'submitAtEnd'].includes(key)), 'VENUE_OPTION', 'Unknown quote execution option');
     const { id, config, ticks, maxPositionLots, traceMode = 'full', orderStorage, submitAtEnd = true } = options;
@@ -16,7 +16,7 @@ export class QuoteExecutionVenue {
     this.#tickIds = new Set(this.#ticks.map(tick => tick.id));
     this.backtest = new Backtest(config, { traceMode, orderStorage });
     this.instrument = this.backtest.config.instrument;
-    this.#reconcile = targetOrders(context => context.target, { feePerLot: this.backtest.config.feePerLot, maxPositionLots });
+    nat(maxPositionLots, 'maxPositionLots'); this.#maxPositionLots = maxPositionLots;
     this.#submitAtEnd = submitAtEnd;
     this.manifest = freezeData({ id, model: 'cash-spot-fifo-quote-v1', instrument: this.instrument,
       datasetHash: hash(this.#ticks), configHash: hash({ config: this.backtest.config, maxPositionLots, submitAtEnd }),
@@ -49,12 +49,36 @@ export class QuoteExecutionVenue {
       funding: { status: 'unsupported', accrued: null }, margin: { model: 'cash-only', leverage: false } });
   }
   setTarget(target, time) { this.reconcileTarget(target, time, this.#quote); }
+  #targetOrders(target, quote) {
+    const { cash, quantity: position } = this.backtest.ledger;
+    const feePerLot = this.backtest.config.feePerLot, cap = BigInt(this.#maxPositionLots);
+    const desired = BigInt(cappedLots(target, this.#maxPositionLots, this.#maxPositionLots));
+    const bid = nat(quote.bid, 'bid', true), ask = nat(quote.ask, 'ask', true);
+    const delta = desired - position, side = delta > 0n ? 'buy' : 'sell', distance = delta < 0n ? -delta : delta;
+    const active = this.backtest.workingOrders;
+    const cancel = order => ({ type: 'cancel', orderId: String(order.id) });
+    if (active.length) {
+      // A pending cancellation can still fill. Wait before adding exposure.
+      if (active.some(order => order.cancel_at.$ === 'Some')) return active.filter(order => order.cancel_at.$ !== 'Some').map(cancel);
+      const total = active.reduce((sum, order) => sum + order.remaining, 0n);
+      const stale = delta === 0n || total > distance || active.some(order =>
+        (order.side.$ === 'Buy' ? 'buy' : 'sell') !== side || (side === 'buy' ? order.limit < ask : order.limit > bid));
+      return stale ? active.map(cancel) : [];
+    }
+    if (delta === 0n) return [];
+    const limit = side === 'buy' ? ask : bid;
+    if (side === 'sell' && limit < BigInt(feePerLot)) return [];
+    const budget = side === 'buy' ? affordableLots(String(cash), '0', String(limit), feePerLot) : String(position);
+    const headroom = side === 'buy' ? (position < cap ? cap - position : 0n) : position;
+    const quantity = cappedLots(String(distance), budget, String(headroom));
+    return quantity === '0' ? [] : [{ type: 'submit', side, limit: String(limit), quantity }];
+  }
   // Internal seam used by the explicit bar-price proxy for venue-owned collars.
   reconcileTarget(target, time, quote) {
     nat(target, 'target');
     requireThat(!this.#finished && this.#time === nat(time, 'decision time'), 'VENUE_TIME', 'Advance venue before setting a target');
     if (!quote || (!this.#submitAtEnd && this.#cursor === this.#ticks.length) || this.#time - BigInt(quote.time) > BigInt(this.backtest.config.maxQuoteAgeMs)) return;
-    const decisions = this.#reconcile({ target, history: [quote], ledger: this.backtest.ledger, orders: this.backtest.workingOrders });
+    const decisions = this.#targetOrders(target, quote);
     for (const decision of decisions) {
       const event = { ...decision, ...this.#base(`strategy-${this.#sequence + 1n}`, time) };
       if (decision.type === 'submit') event.orderId = String(++this.#orderId);

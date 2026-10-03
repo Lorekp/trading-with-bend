@@ -1,4 +1,3 @@
-import { targetOrders } from '../src/target-orders.mjs';
 import { replayQuotes as runStrategy } from './replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -122,8 +121,12 @@ test('strategy warmup, invalid parameters, high fees and zero capital fail safel
   assert.throws(() => movingAverageCrossover({ fast: 3, slow: 3, quantity: '1' }), errorCode('STRATEGY_PARAMETER'));
   assert.throws(() => meanReversion({ entryBps: '100', exitBps: '100', quantity: '1' }), errorCode('STRATEGY_PARAMETER'));
   assert.throws(() => targetPosition(() => 1, { maxPositionLots: '1' })({ history: ticks([100]), ledger: { cash: 1000n, quantity: 0n }, orders: [] }), errorCode('INVALID_INTEGER'));
-  assert.deepEqual(targetOrders('1', { feePerLot: '1', maxPositionLots: '1' })({ history: ticks([100]), ledger: { cash: 0n, quantity: 0n }, orders: [] }), []);
-  assert.deepEqual(targetOrders('0', { feePerLot: '100', maxPositionLots: '1' })({ history: ticks([100]), ledger: { cash: 0n, quantity: 1n }, orders: [] }), []);
+  const empty = runStrategy(config({ initialCash: '101' }), ticks([100, 100, 100]), buyAndHold({ quantity: '2' }));
+  assert.equal(empty.orders.length, 1); assert.equal(empty.fills.length, 1);
+  assert.equal(empty.ledger.cash, 0n); assert.equal(empty.ledger.quantity, 1n);
+  const expensive = runStrategy(config({ feePerLot: '100' }), ticks([100, 100, 100, 100]), ({ tickCount }) => tickCount === 1 ? '1' : '0');
+  assert.equal(expensive.orders.length, 1); assert.equal(expensive.fills.length, 1);
+  assert.equal(expensive.ledger.quantity, 1n); assert.equal(expensive.ledger.cash, 800n);
 });
 test('moving average and mean reversion trade using actual Bend accounting and executable quotes', () => {
   const scenarios = [

@@ -232,13 +232,30 @@ chain. The ridge objective is summed squared error plus alpha times squared
 standardized coefficients; the intercept is not penalized.
 
 `predictRidge` checks artifact content, schema order/units, fold, deployment and
-feature availability, returning a hashed prediction. `evaluateRegression` never
-fits and rejects training IDs or observations before cutoff. Its low-level
-`partition:'final'` option is **not** a permanent release gate; use it inside
-`withFinalHoldout` for a campaign's final evaluation.
+feature availability, returning a hashed prediction.
+`evaluateRegression({ model, evaluation, schema })` accepts the validation
+artifact from `foldRows` directly. It verifies artifact contents, dataset, split
+plan, fold and cutoff against the model, never fits, and rejects training IDs or
+observations before cutoff. Decision times come from each row's `decisionTime`
+when supplied, otherwise its feature's `availableAt`; deployment and feature
+availability are checked for every prediction. Declare custom decision times in
+the samples before creating the split plan, rather than modifying a partition.
+Metrics retain the evaluation partition hash, dataset/plan hashes and, for final
+evaluation, the release hash.
 
-`withFinalHoldout` consumes a persistent claim before exposing final rows. It is
-single-use across processes for the dataset hash plus holdout ID, even when work
+For online training, use `evaluationWindow(rows, { training })`, where `training`
+is the exact `trainingWindow` artifact used to fit the model and rows are marked
+`validation`. This binds evaluation to that training window without claiming
+membership in a split plan. Split-trained models require split artifacts.
+
+`withFinalHoldout` consumes a persistent claim before exposing a final partition
+artifact to `(evaluation, claim) => result`. Pass `evaluation` directly to
+`evaluateRegression`, or use `evaluation.rows` for another estimator. Final
+partitions belong to the whole plan; ridge evaluation checks the model's dataset
+and plan rather than requiring a validation-fold identity. Online models have no
+plan to compare, so final evaluation enforces row exclusion and chronology and
+records the released dataset/plan lineage without asserting shared study origin.
+The gate is single-use across processes for the dataset hash plus holdout ID, even when work
 fails or the process crashes. Freeze the strategy hash and protocol before use.
 Changing strategy parameters cannot recover that claim. Choosing another dataset
 identity/holdout name or reading files outside the API is beyond its cooperative

@@ -21,8 +21,8 @@ export default async function experiment(configuration, context) {
   const samples = features.flatMap((feature, i) => !feature.ready || i === ticks.length - 1 ? [] : [{ id: `sample-${i}`, time: feature.time, labelAvailableAt: ticks[i + 1].time, feature, target: Number(ticks[i + 1].bid) / Number(ticks[i].bid) - 1 }]);
   const plan = walkForwardSplits(samples, { trainSize: 50, validationSize: 30, embargoMs: '2', finalStart: 110 });
   const fold = plan.folds[0], training = foldRows(samples, plan, fold.id, 'train', 'train');
-  const validation = foldRows(samples, plan, fold.id, 'select', 'validation').rows;
-  const wantedTimes = new Set(validation.map(row => row.time));
+  const validation = foldRows(samples, plan, fold.id, 'select', 'validation');
+  const wantedTimes = new Set(validation.rows.map(row => row.time));
   const evaluationTicks = ticks.filter(t => wantedTimes.has(t.time));
   const execution = { quantity: '10' };
   let strategy, regression = null, model = null;
@@ -33,13 +33,13 @@ export default async function experiment(configuration, context) {
     // Explicit fixture assumption: training/deployment take one simulated ms.
     const deployedAt = String(BigInt(fold.cutoff) + 1n);
     model = fitRidge({ training, schema, trainingStartedAt: training.cutoff, trainingCompletedAt: deployedAt, deployedAt, alpha: parameters.alpha ?? 1 });
-    const byTime = new Map(validation.map(row => [row.time, row.feature]));
+    const byTime = new Map(validation.rows.map(row => [row.time, row.feature]));
     strategy = targetPosition(({ history }) => {
       const time = history.at(-1).time;
       const p = predictRidge({ model, feature: byTime.get(time), schema, fold: training.fold, decisionTime: time });
       return p.prediction > (parameters.threshold ?? 0) ? execution.quantity : '0';
     }, { maxPositionLots: execution.quantity });
-    regression = evaluateRegression({ model, rows: validation.map(row => ({ ...row, decisionTime: row.time })), schema, fold: training.fold, partition: 'validation' });
+    regression = evaluateRegression({ model, evaluation: validation, schema });
     context.writeArtifact('model.json', model);
     context.writeArtifact('regression.json', regression);
   } else throw new Error(`Unknown strategy kind ${kind}`);

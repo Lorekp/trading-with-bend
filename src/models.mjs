@@ -132,22 +132,36 @@ export function predictRidge({ model, feature, schema, fold, decisionTime }) {
   return seal({ format: 'ridge-prediction-v1', modelHash: model.hash, preprocessingHash: model.preprocessingHash, featureHash: feature.hash, featureSchemaHash: model.featureSchemaHash, fold, decisionTime, prediction });
 }
 
-/** Evaluates already-fitted parameters on a separately named partition; it never fits or selects a model. */
-export function evaluateRegression({ model, rows, schema, fold, partition }) {
+/** Evaluates fitted parameters with intact partition lineage; never fits or selects a model. */
+export function evaluateRegression({ model, evaluation, schema }) {
+  const partition = evaluation?.partition;
   requireThat(['validation', 'final'].includes(partition), 'EVALUATION_PARTITION', 'Evaluation requires validation or final partition');
+  const { rows } = validatePartition(evaluation, partition);
   requireThat(Array.isArray(rows) && rows.length > 0, 'EVALUATION_DATA', 'Evaluation rows are required');
-  validateRidgeModel({ model, schema, fold, decisionTime: rows[0]?.decisionTime });
+  const fold = partition === 'final' ? model.fold : evaluation.fold;
+  const decisionTime = row => row.decisionTime ?? row.feature.availableAt;
+  validateRidgeModel({ model, schema, fold, decisionTime: decisionTime(rows[0]) });
+  if (model.planHash !== null) {
+    requireThat(evaluation.datasetHash === model.datasetHash, 'DATASET_MISMATCH', 'Evaluation belongs to another dataset');
+    requireThat(evaluation.planHash === model.planHash, 'SPLIT_MISMATCH', 'Evaluation belongs to another split plan');
+  } else if (partition === 'validation') {
+    requireThat(evaluation.origin === 'evaluation-window' && evaluation.trainingPartitionHash === model.trainingPartitionHash,
+      'EVALUATION_PARTITION', 'Online evaluation must belong to the exact training window');
+  }
+  if (partition === 'validation') requireThat(evaluation.cutoff === model.trainingCutoff, 'EVALUATION_PARTITION', 'Evaluation cutoff differs from training');
   const trainingIds = new Set(model.trainingRowIds), ids = new Set();
   const predictions = rows.map(row => {
     requireThat(row && row.partition === partition && typeof row.id === 'string' && row.id.length > 0 && !ids.has(row.id) && !trainingIds.has(row.id), 'EVALUATION_PARTITION', 'Evaluation IDs must be unique, held out, and in the requested partition'); ids.add(row.id);
     finite(row.target, 'evaluation target');
     requireThat(nat(row.labelAvailableAt, 'labelAvailableAt') >= nat(row.feature.time, 'feature.time'), 'EVALUATION_DATA', 'Evaluation label precedes observation');
     requireThat(nat(row.feature.time, 'feature.time') >= nat(model.trainingCutoff, 'trainingCutoff'), 'EVALUATION_PARTITION', 'Evaluation observations must be at or after the exclusive training cutoff');
-    return predictRidge({ model, feature: row.feature, schema, fold, decisionTime: row.decisionTime });
+    return predictRidge({ model, feature: row.feature, schema, fold, decisionTime: decisionTime(row) });
   });
   const metrics = regressionMetrics(predictions.map(prediction => prediction.prediction), rows.map(row => row.target));
-  return seal({ format: 'regression-evaluation-v1', modelHash: model.hash, fold, partition, rowCount: rows.length, ...metrics,
-    evaluationDataHash: hash(rows.map(row => ({ id: row.id, featureHash: row.feature.hash, target: row.target, labelAvailableAt: row.labelAvailableAt, decisionTime: row.decisionTime }))), predictions });
+  return seal({ format: 'regression-evaluation-v2', modelHash: model.hash, fold, partition, rowCount: rows.length, ...metrics,
+    evaluationPartitionHash: evaluation.hash, datasetHash: evaluation.datasetHash, planHash: evaluation.planHash,
+    releaseHash: evaluation.releaseHash ?? null,
+    evaluationDataHash: hash(rows.map(row => ({ id: row.id, featureHash: row.feature.hash, target: row.target, labelAvailableAt: row.labelAvailableAt, decisionTime: decisionTime(row) }))), predictions });
 }
 
 /** Numerical forecast errors only; callers enforce partition and model lineage. */

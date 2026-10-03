@@ -74,16 +74,31 @@ export function trainingWindow(rows, { fold, cutoff }) {
     fold, cutoff, partition: 'train', rows });
 }
 
-// Shared fitting seam: verify the complete artifact before deriving its metadata.
+/** Held-out observations bound to an online training window, without a split-plan claim. */
+export function evaluationWindow(rows, { training }) {
+  validatePartition(training, 'train');
+  requireThat(training.origin === 'training-window', 'PARTITION_DENIED', 'Split-trained models require a split partition');
+  requireThat(Array.isArray(rows) && rows.every(row => row?.partition === 'validation'), 'EVALUATION_PARTITION', 'Online evaluation requires explicit validation rows');
+  return partitionArtifact({ origin: 'evaluation-window', datasetHash: training.datasetHash, planHash: null,
+    foldId: training.foldId, fold: training.fold, cutoff: training.cutoff, trainingPartitionHash: training.hash,
+    partition: 'validation', rows });
+}
+
+// Shared fitting/evaluation seam: verify the artifact before deriving its metadata.
 export function validatePartition(artifact, partition) {
   requireThat(artifact && typeof artifact === 'object', 'PARTITION_ARTIFACT', 'A research partition artifact is required');
   const { hash: digest, ...body } = artifact;
   requireThat(body.format === 'research-partition-v1' && digest === hash(body), 'PARTITION_ARTIFACT', 'Research partition content changed');
-  requireThat(body.partition === partition && Array.isArray(body.rows) && body.rows.every(row => row.partition === partition), 'PARTITION_DENIED', 'Unexpected research partition');
+  requireThat(body.partition === partition && Array.isArray(body.rows) && body.rows.every(row => row?.partition === partition), 'PARTITION_DENIED', 'Unexpected research partition');
   requireThat(typeof body.fold === 'string' && body.fold.length > 0 && /^[0-9a-f]{64}$/.test(body.datasetHash), 'PARTITION_ARTIFACT', 'Partition identity is required');
   nat(body.cutoff, 'partition cutoff');
-  requireThat(body.origin === 'split' ? /^[0-9a-f]{64}$/.test(body.planHash) && body.fold === hash({ planHash: body.planHash, foldId: body.foldId }) :
-    body.origin === 'training-window' && partition === 'train' && body.planHash === null && body.datasetHash === hash(body.rows), 'PARTITION_ARTIFACT', 'Invalid partition lineage');
+  const planned = /^[0-9a-f]{64}$/.test(body.planHash) && body.fold === hash({ planHash: body.planHash, foldId: body.foldId });
+  requireThat(
+    (body.origin === 'split' && ['train', 'validation'].includes(partition) && planned) ||
+    (body.origin === 'final-holdout' && partition === 'final' && planned && body.foldId === 'final' && /^[0-9a-f]{64}$/.test(body.releaseHash)) ||
+    (body.origin === 'training-window' && partition === 'train' && body.planHash === null && body.datasetHash === hash(body.rows)) ||
+    (body.origin === 'evaluation-window' && partition === 'validation' && body.planHash === null && /^[0-9a-f]{64}$/.test(body.trainingPartitionHash)),
+    'PARTITION_ARTIFACT', 'Invalid partition lineage');
   return artifact;
 }
 
@@ -101,9 +116,12 @@ export async function withFinalHoldout(directory, { holdoutId, strategyHash, pro
   const claim = { format: 'holdout-release-v1', token, holdoutId, datasetHash: plan.datasetHash, planHash: hash(plan), strategyHash, protocol: structuredClone(protocol), releasedAt: new Date().toISOString(), pid: process.pid };
   try { writeFileSync(path, json(claim), { flag: 'wx' }); }
   catch (error) { if (error.code === 'EEXIST') throw Object.assign(new Error('Final holdout has already been released; use its existing audit record'), { code: 'FINAL_TEST_REUSE' }); throw error; }
-  const finalRows = frozenCopy(plan.final.map(i => samples[i]));
   try {
-    const result = await work(finalRows, frozenCopy(claim));
+    const planHash = claim.planHash, foldId = 'final';
+    const evaluation = partitionArtifact({ origin: 'final-holdout', datasetHash: plan.datasetHash, planHash, foldId,
+      fold: hash({ planHash, foldId }), cutoff: samples[plan.final[0]].time, partition: 'final', releaseHash: hash(claim),
+      rows: plan.final.map(i => ({ ...samples[i], partition: 'final' })) });
+    const result = await work(evaluation, frozenCopy(claim));
     writeFileSync(join(directory, `${key}.result.json`), json({ token, status: 'completed', resultHash: hash(result), result }), { flag: 'wx' });
     return result;
   } catch (error) {
