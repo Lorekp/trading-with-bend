@@ -1,0 +1,8 @@
+{
+  "schema": "speed-benchmark-v1",
+  "suite": "quote-replay-v1",
+  "profile": "release",
+  "datasetSeed": 1,
+  "scheduleSeed": 12345,
+  "analysisSeed": 67890
+}
