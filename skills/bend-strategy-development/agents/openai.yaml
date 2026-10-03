@@ -1,0 +1,3 @@
+interface:
+  display_name: "Bend Strategy Development"
+  short_description: "Build causal strategies with local adapters"

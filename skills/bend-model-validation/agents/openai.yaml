@@ -1,0 +1,3 @@
+interface:
+  display_name: "Bend Model Validation"
+  short_description: "Fit and evaluate timestamp-safe trading models"

@@ -3,6 +3,12 @@
 Use `src/index.mjs` or the focused modules in `src/` before writing duplicate
 accounting, execution, feature, sizing, split, metric or registry code.
 
+## Research skills
+
+For trading research and backtesting, start with
+[Bend Research](skills/bend-research/SKILL.md). It provides shared framework
+context and routes the current work to the relevant specialist skills.
+
 ## Experiments
 
 - Put new strategy workers and their helpers under `experiments/<agent-or-study>/`.

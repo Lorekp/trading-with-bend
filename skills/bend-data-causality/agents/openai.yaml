@@ -1,0 +1,3 @@
+interface:
+  display_name: "Bend Data Causality"
+  short_description: "Prepare market data without future leakage"
