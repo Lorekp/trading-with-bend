@@ -23,3 +23,8 @@ export { sequenceSamples } from './sequence-data.mjs';
 export { fitForecast, predictForecast, forecastRuntime } from './forecast.mjs';
 export { openMarketSource } from './market-source.mjs';
 export { prepareMarketData, readProcessedData, loadProcessedInformationSource, asOfMarketData } from './market-data.mjs';
+export { prepareQuoteData, openQuoteData } from './quote-data.mjs';
+export { readReplayAudit } from './recording.mjs';
+export { loadProcessedDerivativeData } from './executable-data.mjs';
+export { evaluateStudy, sampleEquity, selectStudy } from './study.mjs';
+export { prepareInformationSource, openPreparedInformationSource } from './information-source.mjs';

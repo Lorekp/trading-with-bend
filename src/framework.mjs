@@ -1,6 +1,7 @@
 import { verifyBendRuntime } from './bend-runtime.mjs';
-import { BacktestError, freeze, canonical, checked, hash, json, nat, requireThat } from './core.mjs';
+import { BacktestError, freeze, canonical, checked, hash, immutableCopy, json, nat, requireThat } from './core.mjs';
 import { checkpointSources, sourceManifest } from './provenance.mjs';
+import { ReplayRecording, readReplayAudit } from './recording.mjs';
 
 const text = (s, name) => requireThat(typeof s === 'string' && s.length > 0, 'MISSING_FIELD', `${name} is required`);
 function keys(object, allowed, name) {
@@ -91,6 +92,10 @@ export class Backtest {
   #allOrders;
   #publicState;
   #workingOrders;
+  #recording;
+  #fees = 0n;
+  #peak;
+  #drawdown;
   get sources() { return this.#sources; }
   get verification() { return this.#verification; }
   get config() { return this.#config; }
@@ -108,34 +113,42 @@ export class Backtest {
   get valuations() { return Object.freeze(this.#valuations.slice()); }
   get errors() { return Object.freeze(this.#errors.slice()); }
   get options() { return this.#options; }
+  get recordingCounts() { return Object.freeze({ events:this.#events.length, fills:this.#fills.length, trace:this.#trace.length, valuations:this.#valuations.length }); }
   get orders() { return this.#options.orderStorage === 'all' ? this.#orders : this.#allOrders ??= freeze([...this.#archive.values()]); }
   get workingOrders() { return this.#options.orderStorage === 'active' ? this.#orders : this.#workingOrders ??= freeze(this.#orders.filter(order => order.remaining > 0n)); }
   constructor(config, options = {}) {
-    keys(options, ['traceMode', 'orderStorage'], 'options');
-    const traceMode = options.traceMode === undefined ? 'full' : options.traceMode;
+    keys(options, ['traceMode', 'orderStorage', 'auditDirectory'], 'options');
+    const traceMode = options.traceMode === undefined ? (options.auditDirectory === undefined ? 'full' : 'compact') : options.traceMode;
     // Historical orders belong in the audit archive, outside Bend matching and
     // reservation scans. 'all' is retained only as the bounded reference mode.
     const orderStorage = options.orderStorage === undefined ? 'active' : options.orderStorage;
     requireThat(traceMode === 'full' || traceMode === 'compact', 'TRACE_MODE', 'traceMode must be full or compact');
     requireThat(orderStorage === 'all' || orderStorage === 'active', 'ORDER_STORAGE', 'orderStorage must be all or active');
+    requireThat(options.auditDirectory === undefined || orderStorage === 'active' && traceMode === 'compact', 'AUDIT_OPTIONS', 'Disk recording requires active orders and compact trace');
     const { engine, sources, verification } = verifyBendRuntime();
     this.#engine = engine; this.#sources = sources; this.#verification = verification;
     this.#config = freeze(validateConfig(config));
     this.#state = freeze(this.#engine.initial(BigInt(config.initialCash)));
     this.#orders = freeze(orders(this.#state));
     this.#options = freeze({ traceMode, orderStorage }); this.#reservations = freeze(verifyState(this.#state, this.#config));
-    this.#archive = new Map(); this.#closedCancels = new Map(); this.#allOrders = null; this.#publicState = null; this.#workingOrders = null;
-    this.#events = []; this.#trace = []; this.#fills = []; this.#valuations = []; this.#errors = [];
-    this.#seen = new Map(); this.#orderIds = new Set(); this.#lastTime = null; this.#lastSequence = null; this.#mark = null;
+    this.#recording = new ReplayRecording(options.auditDirectory);
+    this.#archive = this.#recording.map('orders'); this.#closedCancels = new Map(); this.#allOrders = null; this.#publicState = null; this.#workingOrders = null;
+    this.#events = this.#recording.series('events'); this.#trace = this.#recording.series('trace');
+    this.#fills = this.#recording.series('fills'); this.#valuations = this.#recording.series('valuations'); this.#errors = [];
+    this.#seen = this.#recording.map('event-identities'); this.#orderIds = this.#recording.map('order-identities');
+    this.#lastTime = null; this.#lastSequence = null; this.#mark = null;
+    this.#peak = BigInt(config.initialCash); this.#drawdown = { numerator: 0n, denominator: this.#peak };
   }
   step(event) {
     try { return this.#apply(event); }
     catch (error) {
       this.#errors.push(freeze({ eventId: typeof event?.id === 'string' ? event.id : null, code: error.code || 'ERROR', message: String(error.message || error) }));
+      if (this.#recording.disk) this.#recording.abort();
       throw error;
     }
   }
   #apply(event) {
+    this.#recording.assertWritable();
     const Engine = this.#engine;
     validateEvent(event, this.#config);
     const digest = hash(event);
@@ -221,72 +234,95 @@ export class Backtest {
           finalOrders.length === this.#orders.length && finalOrders.every((order, index) => sameOrder(order, this.#orders[index]))) {
         state = this.#state; finalOrders = this.#orders;
       }
-      // Commit only after all checks pass.
+      // Persist one validated event before publishing the new live state. A failed
+      // write poisons the recording and leaves the previous account state visible.
+      const auditTrace = { eventId: event.id, sequence: seq, time: t, status, ledger: state.ledger,
+        reservations, fills: newFills.map(f => f.id) };
+      this.#recording.transaction(() => {
+        for (const [id, order] of archiveUpdates) {
+          const previous = this.#archive.get(id);
+          if (!previous || !sameOrder(previous, order)) this.#archive.set(id, order);
+        }
+        this.#seen.set(event.id, digest); if (event.type === 'submit') this.#orderIds.add(event.orderId);
+        this.#events.push(immutableCopy(event)); this.#fills.push(...freeze(newFills));
+        if (this.#options.traceMode === 'full') auditTrace.orders = this.#options.orderStorage === 'all' ? finalOrders : [...this.#archive.values()];
+        this.#trace.push(freeze(auditTrace));
+        if (event.type === 'tick') this.#valuations.push(freeze({ time: t, equity, cash: state.ledger.cash, quantity: state.ledger.quantity, mark: mark.price }));
+      });
+      // Commit only after accounting and recording checks pass.
       this.#state = freeze(state); this.#mark = freeze(mark); this.#lastTime = t; this.#lastSequence = seq;
       this.#orders = freeze(finalOrders);
       this.#reservations = freeze(reservations);
       for (const [id, order] of archiveUpdates) {
-        const previous = this.#archive.get(id);
-        if (previous && sameOrder(previous, order)) continue;
         const immutable = freeze(order);
-        this.#archive.set(id, immutable); this.#allOrders = null;
-        if (order.remaining === 0n && order.cancel_at.$ === 'Some') this.#closedCancels.set(id, immutable);
+        this.#allOrders = null;
+        if (order.remaining === 0n && order.cancel_at.$ === 'Some' && order.cancel_at.value > t) this.#closedCancels.set(id, immutable);
         else this.#closedCancels.delete(id);
       }
       this.#publicState = null; this.#workingOrders = null;
-      this.#seen.set(event.id, digest); if (event.type === 'submit') this.#orderIds.add(event.orderId);
-      this.#events.push(freeze(structuredClone(event))); this.#fills.push(...freeze(newFills));
-      this.#trace.push(freeze({ eventId: event.id, sequence: seq, time: t, status, ledger: state.ledger,
-        ...(this.#options.traceMode === 'full' ? { orders: this.orders } : {}), reservations, fills: newFills.map(f => f.id) }));
-      if (event.type === 'tick') this.#valuations.push(freeze({ time: t, equity, cash: state.ledger.cash, quantity: state.ledger.quantity, mark: mark.price }));
+      this.#fees += newFills.reduce((sum,fill)=>sum+fill.fee,0n);
+      if (event.type === 'tick') {
+        if (equity > this.#peak) this.#peak = equity;
+        const loss = this.#peak - equity;
+        if (loss * this.#drawdown.denominator > this.#drawdown.numerator * this.#peak) this.#drawdown = {numerator:loss,denominator:this.#peak};
+      }
       return { duplicate: false, status, fills: structuredClone(newFills) };
     } catch (error) {
       if (error instanceof BacktestError) throw error;
       throw new BacktestError('BEND_RUNTIME', String(error));
     }
   }
-  run(events) { for (const event of events) this.step(event); return this; }
+  run(events) {
+    try { for (const event of events) this.step(event); return this; }
+    catch(error) { this.#recording.abort(); throw error; }
+  }
   checkpoint() {
+    this.#recording.assertValid();
     // Event-sourced checkpoint: replay reconstructs reservations, queues, cancellations,
     // deduplication identities, valuations and all other continuation state.
-    const body = { format: 'bend-backtest-checkpoint-v2', config: this.#config, options: this.#options, events: this.#events, errors: this.#errors, sources: checkpointSources(this.#sources) };
+    const body = this.#recording.disk
+      ? { format: 'bend-backtest-checkpoint-v3', config: this.#config, options: this.#options, audit: this.#recording.checkpoint({purpose:'checkpoint'}), errors: this.#errors, sources: checkpointSources(this.#sources) }
+      : { format: 'bend-backtest-checkpoint-v2', config: this.#config, options: this.#options, events: this.#events.slice(), errors: this.#errors, sources: checkpointSources(this.#sources) };
     return JSON.parse(json({ ...body, checksum: hash(body) }));
   }
-  static resume(checkpoint) {
+  static resume(checkpoint, options = {}) {
     const { checksum, ...body } = checkpoint;
-    requireThat(body.format === 'bend-backtest-checkpoint-v2' && checksum === hash(body), 'CHECKPOINT_CORRUPT', 'Checkpoint format or checksum invalid');
+    requireThat(['bend-backtest-checkpoint-v2','bend-backtest-checkpoint-v3'].includes(body.format) && checksum === hash(body), 'CHECKPOINT_CORRUPT', 'Checkpoint format or checksum invalid');
     requireThat(canonical(body.sources) === canonical(checkpointSources(sourceManifest())), 'CHECKPOINT_VERSION', 'Checkpoint source artifacts differ from this engine');
-    const run = new Backtest(body.config, body.options ?? {}).run(body.events);
+    requireThat(Object.keys(options).every(key=>key==='auditDirectory'), 'CHECKPOINT_OPTIONS', 'Resume options contain only a new auditDirectory');
+    requireThat(body.format !== 'bend-backtest-checkpoint-v3' || typeof options.auditDirectory === 'string', 'CHECKPOINT_OPTIONS', 'Disk resume requires a new auditDirectory');
+    const run = new Backtest(body.config, {...body.options,...options}).run(body.format === 'bend-backtest-checkpoint-v3' ? readReplayAudit(body.audit,'events') : body.events);
     run.#errors = freeze(structuredClone(body.errors)).slice();
     return run;
   }
-  report() {
+  abort() { this.#recording.abort(); }
+  report({ detail = this.#recording.disk ? 'summary' : 'full' } = {}) {
+    this.#recording.assertValid();
+    requireThat(detail === 'full' || detail === 'summary', 'REPORT_DETAIL', 'Report detail must be full or summary');
     requireThat(this.#errors.length === 0, 'RUN_FAILED', 'Run contains rejected invalid input or runtime errors; start a new run with corrected data');
     const initial = BigInt(this.#config.initialCash), ledger = this.#state.ledger;
     const stale = ledger.quantity > 0n && (!this.#mark || this.#lastTime - this.#mark.time > BigInt(this.#config.maxQuoteAgeMs));
     const equity = stale ? null : ledger.cash + ledger.quantity * (this.#mark?.price || 0n);
     const pnl = equity === null ? null : equity - initial;
-    let peak = initial, drawdown = { numerator: 0n, denominator: initial };
-    for (const v of this.#valuations) {
-      if (v.equity > peak) peak = v.equity;
-      const loss = peak - v.equity;
-      if (loss * drawdown.denominator > drawdown.numerator * peak) drawdown = { numerator: loss, denominator: peak };
-    }
+    const drawdown = this.#drawdown;
     const sources = this.#sources;
     const verification = this.#verification;
+    const audit = this.#recording.disk ? this.#recording.seal({config:this.#config,sources,verification}) : null;
     return JSON.parse(json({
       schema: 'bend-backtest-report-v1', status: stale ? 'invalid-terminal-valuation' : 'valid-under-declared-model',
-      ledger, reservations: this.#reservations, orders: this.orders, recording: { traceMode: this.#options.traceMode },
+      ledger, reservations: this.#reservations, ...(detail === 'full' ? { orders: this.orders } : {}), recording: { traceMode: this.#options.traceMode },
+      ...(audit ? {audit} : {}),
       performance: { initialEquity: initial, terminalEquity: equity, netPnl: pnl,
         totalReturn: pnl === null ? null : { numerator: pnl, denominator: initial },
         maxDrawdownAtQuoteSamples: this.#valuations.length ? drawdown : null,
-        fees: this.#fills.reduce((sum, f) => sum + f.fee, 0n), sharpe: { value: null, reason: 'No regular sampling frequency or annualization convention specified' } },
+        fees: this.#fees, sharpe: { value: null, reason: 'No regular sampling frequency or annualization convention specified' } },
       softwareChecks: { bendCompiler: verification.compiler, bendKernel: verification.kernel, runtimeInvariants: 'passed-for-processed-events', proofScope: 'See docs/CONTRACT.md; end-to-end engine properties are tested, not all formally proved' },
       dataQuality: { status: stale ? 'critical-stale-terminal-mark' : 'accepted', acceptedUniqueEvents: this.#events.length, historicalUniverse: [this.#config.instrument.symbol] },
       assumptions: { model: 'cash-spot-fifo-quote-v1', liquidity: 'Each unique tick provides independent bid/ask budgets, replenished only by the next unique tick; no queue position or impact estimation', fees: 'Nonnegative fixed quote minor units per filled lot', price: 'Buys at ask; sells at bid; ordinary limit orders only', timing: 'Fill time >= arrival and > decision; effective cancellation wins ties; report delay zero', valuation: 'Open positions marked at last bid; no hypothetical exit fee; stale terminal marks invalidate performance', capital: 'No leverage, shorting, external cash flows, corporate actions or settlement delay', returns: 'Net P&L / initial cash; open positions included; no external capital accepted', strategy: 'Supplied order decisions are external and not a proof of information availability' },
-      manifest: { ...this.#config.manifest, datasetHash: hash(this.#events), configHash: hash(this.#config), sourceHashes: sources, toolchain: verification.toolchain, proofKernelHash: verification.kernelHash, runtime: { node: process.version, platform: process.platform, architecture: process.arch }, stochasticInputs: 'None used by engine' },
+      manifest: { ...this.#config.manifest, datasetHash: this.#events.hash, configHash: hash(this.#config), sourceHashes: sources, toolchain: verification.toolchain, proofKernelHash: verification.kernelHash, runtime: { node: process.version, platform: process.platform, architecture: process.arch }, stochasticInputs: 'None used by engine' },
       reproducibility: { ledgerReplay: 'Exact replay requires the hashed input events, configuration and source artifacts', strategyResearch: 'Not established: strategyArtifact and evaluationProtocol are supplied identifiers, not independent attestations of external research' },
-      fills: this.#fills, valuations: this.#valuations, trace: this.#trace, traceHash: hash(this.#trace)
+      ...(detail === 'full' ? {fills:this.#fills.slice(),valuations:this.#valuations.slice(),trace:this.#trace.slice()} : {}),
+      traceHash: this.#trace.hash
     }));
   }
 }

@@ -1,0 +1,43 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backtesting:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.16.0', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install locked dependencies and pinned Bend compiler
+        run: bash scripts/setup.sh
+      - name: Install checksum-verified Lean
+        shell: bash
+        run: |
+          set -euo pipefail
+          lean_version=$(node -p "JSON.parse(require('fs').readFileSync('toolchain.json')).leanVersion")
+          lean_hash=$(node -p "JSON.parse(require('fs').readFileSync('toolchain.json')).leanLinuxX64ArchiveSha256")
+          archive="lean-${lean_version}-linux.tar.zst"
+          curl --fail --location --retry 3 "https://github.com/leanprover/lean4/releases/download/v${lean_version}/${archive}" -o ".tools/${archive}"
+          echo "${lean_hash}  .tools/${archive}" | sha256sum --check -
+          tar --extract --file ".tools/${archive}" --directory .tools
+      - name: Build and verify Bend and Lean proofs
+        run: |
+          npm run proof
+          node --input-type=module -e "import assert from 'node:assert/strict'; import { readFileSync } from 'node:fs'; const evidence = JSON.parse(readFileSync('build/verification.json')); assert.equal(evidence.compiler, 'passed'); assert.equal(evidence.kernel, 'passed'); assert.match(evidence.kernelHash, /^[a-f0-9]{64}$/);"
+      - name: End-to-end workflows
+        run: node scripts/test-e2e.mjs
+      - name: Focused regressions
+        run: npm run test:regression

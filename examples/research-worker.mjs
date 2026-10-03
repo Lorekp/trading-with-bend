@@ -1,9 +1,10 @@
-import { runStrategy, quoteInformationSource, QuoteExecutionVenue } from '../src/index.mjs';
+import { quoteInformationSource, QuoteExecutionVenue } from '../src/index.mjs';
 // Shared worker example: identical data/evaluation windows for rules and ML.
 import { syntheticQuotes } from '../src/data.mjs';
 import { computeFeatures } from '../src/features.mjs';
 import { fitRidge, predictRidge, evaluateRegression } from '../src/models.mjs';
-import { walkForwardSplits, foldRows } from '../src/evaluation.mjs';
+import { walkForwardSplits } from '../src/evaluation.mjs';
+import { evaluateStudy } from '../src/study.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion, targetPosition } from '../src/strategies.mjs';
 import { hash } from '../src/core.mjs';
 
@@ -20,36 +21,36 @@ export default async function experiment(configuration, context) {
   const features = computeFeatures(ticks.map(t => ({ time: t.time, availableAt: t.time, values: { mid: (Number(t.bid) + Number(t.ask)) / 2 } })), schema);
   const samples = features.flatMap((feature, i) => !feature.ready || i === ticks.length - 1 ? [] : [{ id: `sample-${i}`, time: feature.time, labelAvailableAt: ticks[i + 1].time, feature, target: Number(ticks[i + 1].bid) / Number(ticks[i].bid) - 1 }]);
   const plan = walkForwardSplits(samples, { trainSize: 50, validationSize: 30, embargoMs: '2', finalStart: 110 });
-  const fold = plan.folds[0], training = foldRows(samples, plan, fold.id, 'train', 'train');
-  const validation = foldRows(samples, plan, fold.id, 'select', 'validation');
-  const wantedTimes = new Set(validation.rows.map(row => row.time));
-  const evaluationTicks = ticks.filter(t => wantedTimes.has(t.time));
   const execution = { quantity: '10' };
-  let strategy, regression = null, model = null;
-  if (kind === 'hold') strategy = buyAndHold(execution);
-  else if (kind === 'crossover') strategy = movingAverageCrossover({ ...execution, fast: parameters.fast ?? 3, slow: parameters.slow ?? 10 });
-  else if (kind === 'reversion') strategy = meanReversion({ ...execution, window: parameters.window ?? 5, entryBps: parameters.entryBps ?? '50' });
-  else if (kind === 'ridge') {
-    // Explicit fixture assumption: training/deployment take one simulated ms.
-    const deployedAt = String(BigInt(fold.cutoff) + 1n);
-    model = fitRidge({ training, schema, trainingStartedAt: training.cutoff, trainingCompletedAt: deployedAt, deployedAt, alpha: parameters.alpha ?? 1 });
-    const byTime = new Map(validation.rows.map(row => [row.time, row.feature]));
-    strategy = targetPosition(({ history }) => {
-      const time = history.at(-1).time;
-      const p = predictRidge({ model, feature: byTime.get(time), schema, fold: training.fold, decisionTime: time });
-      return p.prediction > (parameters.threshold ?? 0) ? execution.quantity : '0';
-    }, { maxPositionLots: execution.quantity });
-    regression = evaluateRegression({ model, evaluation: validation, schema });
-    context.writeArtifact('model.json', model);
-    context.writeArtifact('regression.json', regression);
-  } else throw new Error(`Unknown strategy kind ${kind}`);
-  const config = { instrument, initialCash: '20000', feePerLot: '1', orderLatencyMs: '1', cancelLatencyMs: '2', maxQuoteAgeMs: '100', manifest: {
-    datasetVersion: `synthetic-xorshift32-${datasetSeed}`, strategyArtifact: model?.hash ?? hash({ kind, parameters }), evaluationProtocol: `validation-only/${fold.hash}`, seed: String(context.seed)
-  } };
-  const report = runStrategy(
-    quoteInformationSource({ id: 'synthetic-information', instrument, ticks: evaluationTicks }),
-    new QuoteExecutionVenue({ id: 'synthetic-cash-venue', config, ticks: evaluationTicks, maxPositionLots: execution.quantity }),
-    strategy).report();
-  context.writeArtifact('split-plan.json', plan); context.writeArtifact('report.json', report);
-  return { kind, parameters, datasetHash: hash(ticks), foldHash: fold.hash, report, regressionMetrics: regression ? { mse: regression.mse, mae: regression.mae } : null };
+  const protocol = { warmup: 'history-only', account: 'reset-per-fold', intervalMs: '10', periodsPerYear: 365 * 24 * 60 * 60 * 100, maxStalenessMs: '0' };
+  const study = await evaluateStudy({ samples, plan, protocol }, async ({ fold, training, evaluation: validation }) => {
+    let strategy, regression = null, model = null;
+    if (kind === 'hold') strategy = buyAndHold(execution);
+    else if (kind === 'crossover') strategy = movingAverageCrossover({ ...execution, fast: parameters.fast ?? 3, slow: parameters.slow ?? 10 });
+    else if (kind === 'reversion') strategy = meanReversion({ ...execution, window: parameters.window ?? 5, entryBps: parameters.entryBps ?? '50' });
+    else if (kind === 'ridge') {
+      // Explicit fixture assumption: training/deployment take one simulated ms.
+      const deployedAt = String(BigInt(fold.cutoff) + 1n);
+      model = fitRidge({ training, schema, trainingStartedAt: training.cutoff, trainingCompletedAt: deployedAt, deployedAt, alpha: parameters.alpha ?? 1 });
+      const byTime = new Map(validation.rows.map(row => [row.time, row.feature]));
+      strategy = targetPosition(({ history }) => {
+        const time = history.at(-1).time;
+        const p = predictRidge({ model, feature: byTime.get(time), schema, fold: training.fold, decisionTime: time });
+        return p.prediction > (parameters.threshold ?? 0) ? execution.quantity : '0';
+      }, { maxPositionLots: execution.quantity });
+      regression = evaluateRegression({ model, evaluation: validation, schema });
+      context.writeArtifact(`${fold.id}/model.json`, model);
+      context.writeArtifact(`${fold.id}/regression.json`, regression);
+    } else throw new Error(`Unknown strategy kind ${kind}`);
+    const config = { instrument, initialCash: '20000', feePerLot: '1', orderLatencyMs: '1', cancelLatencyMs: '2', maxQuoteAgeMs: '100', manifest: {
+      datasetVersion: `synthetic-xorshift32-${datasetSeed}`, strategyArtifact: model?.hash ?? hash({ kind, parameters }), evaluationProtocol: `validation-only/${fold.hash}`, seed: String(context.seed)
+    } };
+    return { strategy, baselines: { cash: targetPosition('0'), hold: buyAndHold(execution) },
+      createReplay: () => ({
+        informationSource: quoteInformationSource({ id: 'synthetic-information', instrument, ticks }),
+        executionVenue: new QuoteExecutionVenue({ id: 'synthetic-cash-venue', config, ticks, maxPositionLots: execution.quantity })
+      }), metadata: { modelHash: model?.hash ?? null, regressionMetrics: regression ? { mse: regression.mse, mae: regression.mae } : null } };
+  });
+  context.writeArtifact('split-plan.json', plan); context.writeArtifact('study.json', study);
+  return { kind, parameters, datasetHash: hash(ticks), study };
 }

@@ -1,40 +1,51 @@
 import { Backtest } from './framework.mjs';
 import { hash, nat, requireThat, freeze as freezeData } from './core.mjs';
 import { validateTicks } from './data.mjs';
+import { assertQuoteInstrument, isQuoteDataset } from './quote-data.mjs';
 import { affordableLots, cappedLots } from './policies.mjs';
 
 /** Bend cash venue. No InformationSource or source observation enters this module. */
 export class QuoteExecutionVenue {
-  #ticks; #tickIds; #cursor = 0; #time = null; #quote = null; #sequence = 0n; #orderId = 0n;
+  #iterator; #next; #hasTickId; #time = null; #quote = null; #sequence = 0n; #orderId = 0n;
   #maxPositionLots; #finished = false; #terminalSequence; #submitAtEnd;
   constructor(options) {
-    requireThat(options && Object.keys(options).every(key => ['id', 'config', 'ticks', 'maxPositionLots', 'traceMode', 'orderStorage', 'submitAtEnd'].includes(key)), 'VENUE_OPTION', 'Unknown quote execution option');
-    const { id, config, ticks, maxPositionLots, traceMode = 'full', orderStorage, submitAtEnd = true } = options;
+    requireThat(options && Object.keys(options).every(key => ['id', 'config', 'ticks', 'maxPositionLots', 'traceMode', 'orderStorage', 'submitAtEnd', 'auditDirectory'].includes(key)), 'VENUE_OPTION', 'Unknown quote execution option');
+    const { id, config, ticks, maxPositionLots, traceMode, orderStorage, submitAtEnd = true, auditDirectory } = options;
     requireThat(typeof submitAtEnd === 'boolean', 'VENUE_OPTION', 'submitAtEnd must be boolean');
     requireThat(typeof id === 'string' && id.length > 0, 'EXECUTION_VENUE', 'Venue identity is required');
-    this.#ticks = freezeData(validateTicks(ticks, { instrument: config.instrument }));
-    this.#tickIds = new Set(this.#ticks.map(tick => tick.id));
-    this.backtest = new Backtest(config, { traceMode, orderStorage });
+    let datasetHash;
+    if (isQuoteDataset(ticks)) {
+      assertQuoteInstrument(ticks,config.instrument);
+      this.#iterator = ticks.rows(); this.#hasTickId = id=>ticks.hasId(id); datasetHash=ticks.manifest.datasetHash;
+    } else {
+      const quotes = freezeData(validateTicks(ticks, { instrument: config.instrument })), ids = new Set(quotes.map(tick=>tick.id));
+      this.#iterator = quotes.values(); this.#hasTickId = id=>ids.has(id); datasetHash=hash(quotes);
+    }
+    this.#next = this.#iterator.next();
+    this.backtest = new Backtest(config, { traceMode, orderStorage, auditDirectory });
     this.instrument = this.backtest.config.instrument;
     nat(maxPositionLots, 'maxPositionLots'); this.#maxPositionLots = maxPositionLots;
     this.#submitAtEnd = submitAtEnd;
+    const { manifest: _strategyManifest, ...executionConfig } = this.backtest.config;
     this.manifest = freezeData({ id, model: 'cash-spot-fifo-quote-v1', instrument: this.instrument,
-      datasetHash: hash(this.#ticks), configHash: hash({ config: this.backtest.config, maxPositionLots, submitAtEnd }),
+      datasetHash, configHash: hash({ config: this.backtest.config, maxPositionLots, submitAtEnd }),
+      executionPolicyHash: hash({ config: executionConfig, maxPositionLots, submitAtEnd }),
       funding: 'unsupported', margin: 'cash-only-no-leverage' });
     Object.freeze(this);
   }
   #base(id, time) {
     // Input IDs have no reserved namespace, including ticks still in the future.
-    while (this.#tickIds.has(id)) id += '-';
+    while (this.#hasTickId(id)) id += '-';
     return { id, time, sequence: String(++this.#sequence), symbol: this.instrument.symbol, currency: this.instrument.currency };
   }
   advanceTo(time) {
     const now = nat(time, 'venue time');
     requireThat(!this.#finished && (this.#time === null || now >= this.#time), 'VENUE_TIME', 'Venue time must advance on an unfinished replay');
-    while (this.#cursor < this.#ticks.length && BigInt(this.#ticks[this.#cursor].time) <= now) {
-      const tick = this.#ticks[this.#cursor++];
+    while (!this.#next.done && BigInt(this.#next.value.time) <= now) {
+      const tick = this.#next.value;
       this.backtest.step({ ...tick, sequence: String(++this.#sequence) });
       this.#quote = tick;
+      this.#next = this.#iterator.next();
     }
     if (this.backtest.lastTime !== now) this.backtest.step({ ...this.#base(`venue-clock-${this.#sequence + 1n}`, time), type: 'clock' });
     this.#time = now;
@@ -77,7 +88,7 @@ export class QuoteExecutionVenue {
   reconcileTarget(target, time, quote) {
     nat(target, 'target');
     requireThat(!this.#finished && this.#time === nat(time, 'decision time'), 'VENUE_TIME', 'Advance venue before setting a target');
-    if (!quote || (!this.#submitAtEnd && this.#cursor === this.#ticks.length) || this.#time - BigInt(quote.time) > BigInt(this.backtest.config.maxQuoteAgeMs)) return;
+    if (!quote || (!this.#submitAtEnd && this.#next.done) || this.#time - BigInt(quote.time) > BigInt(this.backtest.config.maxQuoteAgeMs)) return;
     const decisions = this.#targetOrders(target, quote);
     for (const decision of decisions) {
       const event = { ...decision, ...this.#base(`strategy-${this.#sequence + 1n}`, time) };
@@ -89,9 +100,11 @@ export class QuoteExecutionVenue {
     requireThat(!this.#finished, 'VENUE_REUSED', 'Venue already finished');
     if (time !== null) this.advanceTo(time);
     this.#finished = true; this.#terminalSequence = this.backtest.lastSequence;
+    this.#iterator.return?.();
   }
-  report() {
+  abort() { this.#iterator.return?.(); this.backtest.abort(); }
+  report(options) {
     requireThat(this.#finished && this.backtest.lastSequence === this.#terminalSequence, 'VENUE_REPLAY_CHANGED', 'Venue reports require an unchanged completed replay');
-    return this.backtest.report();
+    return this.backtest.report(options);
   }
 }

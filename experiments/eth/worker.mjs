@@ -4,6 +4,7 @@ import { loadBinanceBars } from '../../src/binance-bars.mjs';
 import { createBarStrategy } from '../../src/bar-strategies.mjs';
 import { runBarStrategy } from '../../src/bar-replay.mjs';
 import { hash } from '../../src/core.mjs';
+import { join } from 'node:path';
 
 export default async function ethExperiment(configuration, context) {
   const started = performance.now();
@@ -19,7 +20,7 @@ export default async function ethExperiment(configuration, context) {
     } };
   const replay = runBarStrategy(
     barInformationSource({ id: 'binance-information', instrument: config.instrument, bars: dataset.bars }),
-    new BarExecutionVenue({ id: 'binance-cash-price-proxy', config, bars: dataset.bars, ...execution, maxPositionLots: specification.quantity, traceMode: 'compact' }),
+    new BarExecutionVenue({ id: 'binance-cash-price-proxy', config, bars: dataset.bars, ...execution, maxPositionLots: specification.quantity, traceMode: 'compact', auditDirectory: join(context.outputDirectory,'audit') }),
     strategy);
   const replayed = performance.now();
   const report = replay.report();
@@ -30,7 +31,7 @@ export default async function ethExperiment(configuration, context) {
   const measured = performance.now();
   const metrics = { ingestMs: Math.round(loaded - started), replayMs: Math.round(replayed - loaded), reportMs: Math.round(measured - replayed),
     totalMs: Math.round(measured - started), bars: dataset.bars.length, events: report.dataQuality.acceptedUniqueEvents,
-    fills: report.fills.length, heapMiB: Math.round(process.memoryUsage().heapUsed / 1048576), rssMiB: Math.round(process.memoryUsage().rss / 1048576) };
+    fills: report.audit.streams.fills.count, heapMiB: Math.round(process.memoryUsage().heapUsed / 1048576), rssMiB: Math.round(process.memoryUsage().rss / 1048576) };
   context.writeArtifact('report.json', report);
   context.writeArtifact('data-provenance.json', dataset.provenance);
   context.writeArtifact('strategy-diagnostics.json', report.barReplay.strategyDiagnostics);

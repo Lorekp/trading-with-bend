@@ -8,6 +8,11 @@ import { cappedLots, affordableLots, trainingAllowed, canReadPartition, modelRea
 import { walkForwardSplits, foldRows, withFinalHoldout, regularReturns, comparisonTable } from '../src/evaluation.mjs';
 import { Backtest } from '../src/framework.mjs';
 import { hash, MAX_NAT } from '../src/core.mjs';
+import { evaluateStudy, sampleEquity, selectStudy } from '../src/study.mjs';
+import { quoteInformationSource } from '../src/information-source.mjs';
+import { QuoteExecutionVenue } from '../src/execution-venue.mjs';
+import { targetPosition } from '../src/strategies.mjs';
+import researchWorker from '../examples/research-worker.mjs';
 
 const samples = Array.from({ length: 16 }, (_, i) => ({ id: `s${i}`, time: String(10 * i), labelAvailableAt: String(10 * i + 15), value: i }));
 const options = { trainSize: 5, validationSize: 2, finalStart: 13, embargoMs: '5' };
@@ -88,4 +93,80 @@ test('comparison retains failed trials and readonly ledger views cannot corrupt 
   assert.throws(() => run.fills.pop(), TypeError); assert.throws(() => { run.state = {}; }, TypeError);
   assert.deepEqual(run.report(), report);
   assert.deepEqual(comparisonTable([{ id: 'b', status: 'failed', error: 'crash' }, { id: 'a', status: 'completed', report }]).map(x => [x.id, x.valid]), [['a', true], ['b', false]]);
+});
+
+test('equity sampling uses last same-time state without looking ahead and rejects stale or deficit history', () => {
+  const report = { status: 'valid-under-declared-model', dataQuality: { status: 'accepted' }, valuations: [
+    { time: '0', equity: '100' }, { time: '0', equity: '110' }, { time: '15', equity: '90' }, { time: '20', equity: '95' }
+  ] };
+  const protocol = { startTime: '0', endTime: '20', intervalMs: '10', maxStalenessMs: '10' };
+  assert.deepEqual(sampleEquity(report, protocol), [{ time: '0', equity: '110' }, { time: '10', equity: '110' }, { time: '20', equity: '95' }]);
+  assert.throws(() => sampleEquity(report, { ...protocol, maxStalenessMs: '9' }), { code: 'STALE_SAMPLING' });
+  assert.throws(() => sampleEquity(report, { ...protocol, endTime: '21' }), { code: 'METRIC_GRID' });
+  for (const equity of [null, '-1', '0']) assert.throws(() => sampleEquity({ ...report, valuations: [report.valuations[0], { time: '5', equity }, ...report.valuations.slice(2)] }, protocol), { code: 'UNDEFINED_RETURN' });
+  assert.throws(() => sampleEquity({ ...report, terminal: { deficit: '1' } }, protocol), { code: 'UNDEFINED_RETURN' });
+});
+
+test('study runs every fold through real replay with historical warmup, reset accounts, baselines and no final observations', async () => {
+  const instrument = { symbol: 'STUDY', currency: 'EUR', lotSize: '1', priceTick: '1' };
+  const ticks = Array.from({ length: 12 }, (_, i) => ({ id: `q${i}`, type: 'tick', time: String(i * 10), sourceTime: String(i * 10), sequence: String(i + 1),
+    symbol: instrument.symbol, currency: instrument.currency, bid: String(100 + i), ask: String(101 + i), bidLots: '10', askLots: '10' }));
+  const rows = ticks.map(t => ({ id: t.id, time: t.time, labelAvailableAt: String(BigInt(t.time) + 1n) }));
+  const plan = walkForwardSplits(rows, { trainSize: 3, validationSize: 3, finalStart: 9 });
+  const protocol = { warmup: 'history-only', account: 'reset-per-fold', intervalMs: '10', periodsPerYear: 252, maxStalenessMs: '0' };
+  const decisions = [], accounts = [];
+  const config = { instrument, initialCash: '1000', feePerLot: '0', orderLatencyMs: '1', cancelLatencyMs: '0', maxQuoteAgeMs: '10',
+    manifest: { datasetVersion: 'study-fixture', strategyArtifact: 'test', evaluationProtocol: 'validation', seed: '1' } };
+  const study = await evaluateStudy({ samples: rows, plan, protocol }, ({ fold, training, evaluation }) => {
+    assert.equal(training.partition, 'train'); assert.equal(evaluation.partition, 'validation');
+    let first = true;
+    const strategy = Object.assign(context => {
+      decisions.push({ fold: fold.id, time: context.time, history: context.history.length });
+      if (first) { accounts.push(context.account.ledger.quantity); first = false; }
+      return '1';
+    }, { lookback: 3 });
+    return { strategy, baselines: { cash: targetPosition('0') }, createReplay: () => ({
+      informationSource: quoteInformationSource({ id: 'study-information', instrument, ticks }),
+      executionVenue: new QuoteExecutionVenue({ id: 'study-venue', config, ticks, maxPositionLots: '1' })
+    }) };
+  });
+  assert.equal(study.folds.length, plan.folds.length);
+  assert.equal(decisions.length, 6); assert.ok(decisions.every(row => row.history === 3 && BigInt(row.time) < 90n));
+  assert.deepEqual(accounts, [0n, 0n]);
+  assert.equal(study.aggregate.initialEquity, '2000'); assert.equal(study.baselines.cash.netPnl, '0');
+  for (const fold of study.folds) assert.ok(fold.candidate.report.fills.every(fill => BigInt(fill.decisionTime) >= BigInt(fold.startTime)));
+  const selection = selectStudy([{ id: 'failed', status: 'failed', error: 'crash' }, { id: 'abandoned', status: 'abandoned' },
+    { id: 'b', status: 'completed', study }, { id: 'a', status: 'completed', study: JSON.parse(JSON.stringify(study)) }]);
+  assert.equal(selection.selectedId, 'a'); assert.equal(selection.population.length, 4);
+  const changed = structuredClone(study); changed.aggregate.netPnl = '999999';
+  assert.equal(selectStudy([{ id: 'tampered', status: 'completed', study: changed }]).selectedId, null);
+  for (const corrupt of [
+    value => value.folds.pop(),
+    value => { value.folds[0].baselines.cash.report.status = 'invalid-data-quality'; },
+    value => { delete value.folds[0].baselines.cash; },
+    value => { value.aggregate.totalReturn.numerator = '99999'; },
+    value => { value.baselines.cash.excessReturn.numerator = '99999'; }
+  ]) {
+    const invalid = structuredClone(study); corrupt(invalid); delete invalid.hash; invalid.hash = hash(invalid);
+    const rejected = selectStudy([{ id: 'incomplete', status: 'completed', study: invalid }]);
+    assert.equal(rejected.selectedId, null); assert.equal(rejected.population.length, 1); assert.equal(rejected.population[0].valid, false);
+  }
+  await assert.rejects(evaluateStudy({ samples: rows, plan, protocol }, () => ({ strategy: targetPosition('1'), baselines: { cash: targetPosition('0') },
+    createReplay: ({ variant }) => ({ informationSource: quoteInformationSource({ id: 'study-information', instrument, ticks }),
+      executionVenue: new QuoteExecutionVenue({ id: 'study-venue', config, ticks, maxPositionLots: variant === 'candidate' ? '1' : '2' }) }) })), { code: 'STUDY_BASELINE' });
+  const incompatible = structuredClone(study); incompatible.comparisonHash = hash('different-policy'); delete incompatible.hash; incompatible.hash = hash(incompatible);
+  assert.throws(() => selectStudy([{ id: 'a', status: 'completed', study }, { id: 'b', status: 'completed', study: incompatible }]), { code: 'STUDY_COMPARISON' });
+});
+
+test('research worker fits and evaluates every fold with common baselines and immutable artifacts', async () => {
+  const artifacts = new Map();
+  const result = await researchWorker({ kind: 'ridge', evaluationPartition: 'validation', parameters: { alpha: 1 } },
+    { seed: '1', writeArtifact(name, data) { assert.ok(!artifacts.has(name)); artifacts.set(name, data); } });
+  assert.equal(result.study.folds.length, 2);
+  assert.ok(artifacts.has('fold-1/model.json') && artifacts.has('fold-2/model.json'));
+  assert.deepEqual(Object.keys(result.study.baselines), ['cash', 'hold']);
+  assert.equal(selectStudy([{ id: 'ridge', status: 'completed', study: result.study }]).selectedId, 'ridge');
+  const other = await researchWorker({ kind: 'hold', evaluationPartition: 'validation' }, { seed: '2', writeArtifact() {} });
+  const selection = selectStudy([{ id: 'ridge', status: 'completed', study: result.study }, { id: 'hold', status: 'completed', study: other.study }]);
+  assert.ok(selection.population.every(trial => trial.valid), 'Strategy identities and model seeds may differ under the same execution policy');
 });

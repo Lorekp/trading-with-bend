@@ -2,7 +2,7 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,9 @@ import { deflateRawSync, gzipSync } from 'node:zlib';
 import tar from 'tar-stream';
 import { openMarketSource } from '../../src/market-source.mjs';
 import { prepareMarketData, readProcessedData, loadProcessedInformationSource, asOfMarketData } from '../../src/market-data.mjs';
+import { prepareInformationSource, openPreparedInformationSource } from '../../src/information-source.mjs';
+import { QuoteExecutionVenue } from '../../src/execution-venue.mjs';
+import { runStrategy } from '../../src/replay.mjs';
 import { mkdirSync } from 'node:fs';
 import { loadBinanceBars, loadBinanceSeries } from '../../src/binance-bars.mjs';
 import { downloadHyperliquid, monthWindow, candleCoverage, validateFunding } from '../../scripts/download-hyperliquid.mjs';
@@ -300,10 +303,50 @@ test('Binance and OKX archives publish the same canonical bars through the same 
   assert.deepEqual(await prepareMarketData({ source: await openMarketSource(okx), outputDirectory: okx.outputDirectory }), left);
   const info = await loadProcessedInformationSource(options);
   assert.equal([...info.observations()].length, 2); assert.equal(info.setTarget, undefined); assert.equal(info.report, undefined);
+  await assert.rejects(loadProcessedInformationSource({ ...options, maxRows: 1 }), code('DATA_SIZE'));
+  const prepared = await loadProcessedInformationSource({ ...options, directory: join(okx.parent, 'information') });
+  const audit = prepared.manifest.audit;
+  try {
+    assert.deepEqual([...prepared.observations()], [...info.observations()]);
+    assert.equal(prepared.manifest.datasetHash, info.manifest.datasetHash);
+    assert.equal(prepared.manifest.observationsHash, info.manifest.observationsHash);
+    const config = { instrument: info.instrument, initialCash: '10000000', feePerLot: '0', orderLatencyMs: '0', cancelLatencyMs: '0', maxQuoteAgeMs: '60000',
+      manifest: { datasetVersion: 'fixture', strategyArtifact: 'buy-one', evaluationProtocol: 'equivalence', seed: '0' } };
+    const ticks = ['0', '60000', '120000'].map((time, index) => ({ id: `quote-${index}`, type: 'tick', time, sourceTime: time, sequence: String(index + 1),
+      symbol: info.instrument.symbol, currency: info.instrument.currency, bid: '2000000', ask: '2000010', bidLots: '10', askLots: '10' }));
+    const replay = source => runStrategy(source, new QuoteExecutionVenue({ id: 'fixture-execution', config, ticks, maxPositionLots: '1', traceMode: 'compact' }),
+      ({ observation }) => { assert.ok(Object.isFrozen(observation)); return '1'; }).report();
+    const memoryReport = replay(info), diskReport = replay(prepared);
+    assert.equal(diskReport.fills.length, 1);
+    assert.deepEqual(diskReport.ledger, memoryReport.ledger);
+    assert.deepEqual(diskReport.fills, memoryReport.fills);
+    assert.equal(diskReport.traceHash, memoryReport.traceHash);
+    assert.deepEqual(diskReport.signals, memoryReport.signals);
+  } finally { prepared.close(); }
+  assert.throws(() => [...prepared.observations()], code('INFORMATION_CLOSED'));
+  const reopened = openPreparedInformationSource(audit.manifestPath, { id: 'reused-information' });
+  try { assert.equal(reopened.manifest.id, 'reused-information'); assert.deepEqual([...reopened.observations()], [...info.observations()]); }
+  finally { reopened.close(); }
+  const database = join(dirname(audit.manifestPath), audit.file), changed = readFileSync(database); changed[changed.length - 1] ^= 1; writeFileSync(database, changed);
+  assert.throws(() => openPreparedInformationSource(audit.manifestPath), code('AUDIT_CORRUPT'));
   await assert.rejects(prepareMarketData({ source: await openMarketSource(okx), outputDirectory: join(okx.raw, 'processed') }), code('DATA_OUTPUT'));
   await assert.rejects(prepareMarketData({ source: await openMarketSource({ ...okx, publicationDelayMs: '1' }), outputDirectory: okx.outputDirectory }), code('DATA_OUTPUT_EXISTS'));
   const shard = join(okx.outputDirectory, left.files[0].path), bytes = readFileSync(shard); bytes[20] ^= 1; writeFileSync(shard, bytes);
   await assert.rejects(collect(readProcessedData(options)), code('ARCHIVE_INTEGRITY'));
+});
+
+test('prepared information never publishes an invalid or interrupted observation stream', async t => {
+  const input = await okxFixture(t, 'bars', `${OKX_HEADER}\n${okxBar(0)}\n`);
+  const instrument = { symbol: 'TEST', currency: 'USD', lotSize: '1' };
+  const observation = time => ({ time, availableAt: time, data: { price: '100' } });
+  for (const [name, observations, expected] of [
+    ['regression', [observation('1'), observation('0')], code('INFORMATION_TIME')],
+    ['interrupted', (async function* () { yield observation('0'); throw new Error('Archive verification failed at EOF'); })(), /Archive verification failed at EOF/],
+  ]) {
+    const directory = join(input.parent, name);
+    await assert.rejects(prepareInformationSource({ id: name, instrument, observations, directory }), expected);
+    assert.equal(existsSync(join(directory, 'manifest.json')), false);
+  }
 });
 
 test('cleanup drops only identical identities, records gaps, and never publishes conflicting or corrupt input', async t => {

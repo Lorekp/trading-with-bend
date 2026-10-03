@@ -14,8 +14,8 @@ export function runBarStrategy(informationSource, executionVenue, strategy, opti
     return target;
   }, { lookback: historyLimit });
   const diagnostics = structuredClone(strategy.diagnostics?.() ?? null);
-  return Object.freeze({ ...replay, report() {
-    const report = replay.report();
+  return Object.freeze({ ...replay, report(options) {
+    const report = replay.report(options);
     return { ...report, barReplay: { ...report.barReplay,
       inputBarsHash: informationSource.manifest.datasetHash, count: replay.observationCount,
       startTime: replay.firstObservation?.openTime ?? null, endTime: replay.endTime,

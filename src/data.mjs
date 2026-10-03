@@ -17,21 +17,28 @@ export function validateTicks(ticks, { instrument } = {}) {
   requireThat(Array.isArray(ticks), 'DATA_SCHEMA', 'ticks must be an array');
   const ids = new Set(); let previousTime = null, previousSequence = null;
   for (const [index, tick] of ticks.entries()) {
-    requireThat(tick && tick.type === 'tick' && typeof tick.id === 'string' && tick.id.length > 0, 'DATA_SCHEMA', `Invalid quote at row ${index + 1}`);
-    requireThat(Object.keys(tick).every(key => ['id', 'type', 'symbol', 'currency', ...quoteFields].includes(key)), 'DATA_SCHEMA', `Unsupported quote field at row ${index + 1}`);
+    const values = validateQuoteTick(tick, instrument, index);
     requireThat(!ids.has(tick.id), 'DATA_DUPLICATE', `Duplicate quote ID at row ${index + 1}: ${tick.id}`);
     ids.add(tick.id);
-    requireThat(tick.symbol === instrument.symbol && tick.currency === instrument.currency, 'UNIT_MISMATCH', `Quote row ${index + 1} uses a different instrument/currency`);
-    const values = Object.fromEntries(quoteFields.map(field => [field, nat(tick[field], `row ${index + 1}.${field}`, field === 'bid' || field === 'ask')]));
-    requireThat(values.sourceTime === values.time, 'NON_EXECUTABLE_QUOTE', 'Executable quotes require sourceTime = exchange time');
     requireThat(previousTime === null || values.time >= previousTime, 'OUT_OF_ORDER', 'Input quote timestamps must not decrease; ingestion does not sort');
     requireThat(previousSequence === null || values.sequence > previousSequence, 'OUT_OF_ORDER', 'Input quote sequence numbers must strictly increase');
-    requireThat(values.bid <= values.ask, 'CROSSED_QUOTE', `Crossed quote at row ${index + 1}`);
-    const step = BigInt(instrument.priceTick);
-    requireThat(values.bid % step === 0n && values.ask % step === 0n, 'PRICE_TICK', `Quote row ${index + 1} is off tick`);
     previousTime = values.time; previousSequence = values.sequence;
   }
   return structuredClone(ticks);
+}
+
+// Shared admission for array inputs and disk-prepared async streams.
+export function validateQuoteTick(tick, instrument, index = 0) {
+  instrumentSpec(instrument);
+  requireThat(tick && tick.type === 'tick' && typeof tick.id === 'string' && tick.id.length > 0, 'DATA_SCHEMA', `Invalid quote at row ${index + 1}`);
+  requireThat(Object.keys(tick).every(key => ['id', 'type', 'symbol', 'currency', ...quoteFields].includes(key)), 'DATA_SCHEMA', `Unsupported quote field at row ${index + 1}`);
+  requireThat(tick.symbol === instrument.symbol && tick.currency === instrument.currency, 'UNIT_MISMATCH', `Quote row ${index + 1} uses a different instrument/currency`);
+  const values = Object.fromEntries(quoteFields.map(field => [field,nat(tick[field],`row ${index + 1}.${field}`,field === 'bid' || field === 'ask')]));
+  requireThat(values.sourceTime === values.time,'NON_EXECUTABLE_QUOTE','Executable quotes require sourceTime = exchange time');
+  requireThat(values.bid <= values.ask,'CROSSED_QUOTE',`Crossed quote at row ${index + 1}`);
+  const step = BigInt(instrument.priceTick);
+  requireThat(values.bid % step === 0n && values.ask % step === 0n,'PRICE_TICK',`Quote row ${index + 1} is off tick`);
+  return values;
 }
 
 function csvRows(csv) {

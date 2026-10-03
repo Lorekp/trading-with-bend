@@ -61,7 +61,19 @@ changing or rebuilding sources requires a fresh process for new work.
 Pure data, feature, numerical and grid helpers, along with registry readers,
 remain usable without generated Bend modules or repository metadata.
 
-Version-2 checkpoints contain configuration, all accepted unique input events, failed-input audit records, execution source hashes and a checksum. Restoring replays the full prefix, reconstructing orders, outstanding cancel requests, reservations, duplicate detection, valuations and trace. This is exact and portable JSON, with O(history) restoration rather than a fast binary snapshot. Execution source mismatch or checksum mismatch rejects restore. Execution identity covers the checked Bend build and replay host; research and CLI edits permit restore in a fresh process. Reports and experiment manifests still retain the full toolkit identity, including nested JavaScript and Python modules. Version-1 checkpoints require their original toolkit. No RNG state exists in the pure engine. Stateful strategy callbacks must persist their own state and are not part of these engine checkpoints.
+Version-2 checkpoints contain configuration, all accepted unique input events, failed-input audit records, execution source hashes and a checksum. Restoring replays the full prefix, reconstructing orders, outstanding cancel requests, reservations, duplicate detection, valuations and trace. This is exact and portable JSON, with O(history) restoration rather than a fast binary snapshot. Execution source mismatch or checksum mismatch rejects restore. Execution identity covers the checked Bend build and replay host; research, CLI and npm dependency-lock edits permit restore in a fresh process. Reports and experiment manifests still retain the full toolkit identity, including `package.json`, `package-lock.json`, and nested JavaScript and Python modules. The lockfile binds the declared dependency resolution; it does not attest to installed package contents. Dependency manifests are outside the Bend compiler's build evidence and the dependency-free cash checkpoint identity. Version-1 checkpoints require their original toolkit. No RNG state exists in the pure engine. Stateful strategy callbacks must persist their own state and are not part of these engine checkpoints.
+
+Disk recording produces version-3 checkpoints: a checksummed descriptor references
+an immutable copy of the accepted event prefix, its audit manifest and SQLite
+database. Keep these files at the referenced paths; the descriptor alone is not a
+self-contained checkpoint. Restore with `Backtest.resume(checkpoint,
+{ auditDirectory: newDirectory })`; it verifies the saved bytes and replays the
+prefix into a new recording, still taking O(history) time. Continuing the original
+run does not change its saved checkpoint copy. Database payloads use Node's V8
+serialization; this is host storage, with no claim of cross-language portability
+or formal verification. Complete reports seal disk recordings, so capture a
+checkpoint before reporting if execution must continue. Summary reports preserve
+economics and audit identity; explicit full reports materialize history in memory.
 
 Reports include dataset/config/source hashes, toolchain, runtime, strategy and protocol identifiers, assumptions, trace and a trace hash. The full dataset and generated report should be retained together. Supplied identifiers do not prove that external model training, universe construction or strategy selection was reproducible. Build hashes prevent accidental stale-check claims; they are not signatures against malicious editing.
 

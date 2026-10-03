@@ -21,6 +21,36 @@ observations; `history.length` describes only the visible window.
 The interfaces are synchronous replay interfaces. Live transports, asynchronous
 order acknowledgments and reconnect/recovery protocols are not implemented.
 
+## Admit streams before replay
+
+`prepareInformationSource({ id, instrument, observations, directory, datasetHash? })`
+accepts synchronous or asynchronous observations, validates their publication
+order, and persists them without retaining the full input. It returns the same
+synchronous information interface, plus `close()`. Preparation must finish before
+a strategy runs: a failed stream or final archive check never publishes a complete
+source. The directory must be new; partial attempts are retained for inspection.
+
+For verified processed market shards, use
+`loadProcessedInformationSource({ manifestPath, directory, startTime?, endTime?, allowGaps? })`.
+This path streams directly into preparation without the in-memory row cap. Omit
+`directory` for the existing in-memory path, which defaults to `maxRows: 100000`.
+`maxRows` is only accepted for that in-memory path. Both paths retain the original
+dataset identity and separately hash the selected observations.
+
+`openPreparedInformationSource(manifestPath, { id? })` verifies a saved source and
+opens fresh cursors for another process or study. The prepared source exposes its
+descriptor at `source.manifest.audit`; reopening permits a different routing ID
+without changing the observation identity. Close it after all replays complete.
+
+Execution quotes can independently use
+`await prepareQuoteData(ticks, { instrument, directory })`, where `ticks` is a
+synchronous or asynchronous iterable of executable model quotes. Pass the returned
+dataset directly as `ticks` to `quoteInformationSource` and/or
+`QuoteExecutionVenue`. `openQuoteData(manifestPath)` reopens it. Each dataset owns
+its readers; call `dataset.close()` after all dependent replays finish. These
+adapters do not turn informational prices or displayed book sizes into executable
+liquidity.
+
 ## Compose independently
 
 ```js
@@ -142,3 +172,43 @@ provenance fields. Cash venues' `venue.backtest` exposes the built-in engine for
 checkpoints; appending to it after completion invalidates the venue report.
 Engine checkpoints capture execution only; strategy/source continuation requires
 its own state or replay.
+
+## Durable cash replay audit
+
+Supply `auditDirectory` to a cash venue to persist events, order history, fills,
+valuations and trace in an indexed disk recording. Disk recording requires
+`orderStorage: 'active'` and `traceMode: 'compact'`. Together with prepared quotes
+and bounded strategy history, this removes retention proportional to the number
+of completed events and orders from the live replay. Working orders and pending
+cancellations still require memory. Array inputs remain resident in memory.
+
+```js
+const executionData = await prepareQuoteData(executionTicks, {
+  instrument: config.instrument, directory: 'output/execution-data',
+});
+let source;
+try {
+  source = await loadProcessedInformationSource({
+    manifestPath: 'output/processed/manifest.json', directory: 'output/information-data',
+  });
+  const venue = new QuoteExecutionVenue({
+    id: 'execution', config, ticks: executionData, maxPositionLots: '1000',
+    auditDirectory: 'output/replay-audit',
+  });
+  const report = runStrategy(source, venue, strategy).report();
+  // report.audit binds the complete persisted recording; economics stay inline.
+} finally {
+  source?.close();
+  executionData.close();
+}
+```
+
+Disk `report()` seals the recording and returns summary economics and an audit
+descriptor; report before disposing the replay. `readReplayAudit(report.audit,
+'fills')` iterates verified persisted records without loading all of them.
+`report({ detail: 'full' })` explicitly materializes history and requires memory
+proportional to that history. Memory recording remains the default when no audit
+directory is supplied. Failures abort disk recording; an incomplete attempt has
+no completed manifest. Retain both the manifest and its database when moving or
+archiving evidence. Filesystem storage and SQLite are tested host implementation,
+outside the Bend proof scope.

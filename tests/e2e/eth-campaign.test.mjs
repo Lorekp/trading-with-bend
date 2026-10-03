@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { enqueueExperiment, runQueue, readExperimentResult, verifyExperimentArtifacts } from '../../src/experiments.mjs';
+import { readReplayAudit } from '../../src/recording.mjs';
+import { json } from '../../src/core.mjs';
 
 const manifestPath = resolve('data/binance/um/ETHUSDT/2026-09/manifest.json');
 
@@ -32,6 +34,9 @@ test('downloaded ETH ZIP -> two parallel workers -> real rules/ML fills -> recon
       verifyExperimentArtifacts(root, job.key);
       const directory = job.attempts.at(-1).outputDirectory, path = join(directory, 'report.json');
       const report = JSON.parse(readFileSync(path, 'utf8'));
+      assert.equal(report.fills,undefined,'Campaign artifacts use summary reports');
+      for (const name of ['orders','fills','valuations']) report[name]=JSON.parse(json([...readReplayAudit(report,name)]));
+      report.barReplay.executionInputs=JSON.parse(json([...readReplayAudit(report.barReplay.executionAudit,'executionInputs')]));
       assert.equal(report.barReplay.count, 288);
       assert.equal(report.softwareChecks.bendCompiler, 'passed');
       assert.equal(report.softwareChecks.bendKernel, JSON.parse(readFileSync('build/verification.json', 'utf8')).kernel);
