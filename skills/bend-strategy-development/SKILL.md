@@ -11,7 +11,7 @@ Resolve code/document paths from the target `trading-with-bend` repository. Read
 
 For callback shape, signal state, warmup or position sizing, read [target-position-workflow.md](references/target-position-workflow.md). Reuse `targetPosition`, `buyAndHold`, `movingAverageCrossover`, `meanReversion`, `createBarStrategy` and `RollingFeatures` where their semantics fit. Put new study workers/helpers under `experiments/<study>/`.
 
-For fills, exits, costs, cash versus perpetuals or checkpoint continuation, read [execution-models.md](references/execution-models.md). Compose `runStrategy(source, venue, strategy)` or `runBarStrategy` with explicitly supplied independent datasets. Callbacks return canonical target lot strings or `null`, never raw submit/cancel arrays.
+For fills, exits, intraday holding/funding boundaries, cash versus perpetuals or checkpoint continuation, read [execution-models.md](references/execution-models.md). Compose `runStrategy(source, venue, strategy)` or `runBarStrategy` with explicitly supplied independent datasets. Callbacks return canonical target lot strings or `null`, never raw submit/cancel arrays.
 
 Use fresh strategy and venue instances for each replay. Read actual holdings and working orders rather than assuming a signal filled. Keep money/quantity arithmetic exact and source-derived features separate from venue valuation.
 

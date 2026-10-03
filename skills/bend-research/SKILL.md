@@ -38,6 +38,10 @@ Use existing toolkit modules before adding parallel implementations. Place study
 
 Train on the admitted training partition, select on validation, and keep failed/abandoned attempts visible. Comparisons use the same dataset and evaluation windows; changed execution assumptions remain labeled stress populations. Interpret results against controls and the declared objective, including open exposure and costs.
 
-Final evaluation uses `withFinalHoldout` only when the task requires it and strategy/protocol selection is frozen. Its release remains consumed after failure. Further tuning needs genuinely untouched evidence, not a renamed claim.
+For official multi-agent studies, name one coordinator for the frozen specification, common inputs, total search/resource budget and complete report. Use `createCampaign().submit/seal/run/report`; load the campaign specialist before admission. Raw queues remain suitable for focused diagnostics. Count prior studies, manual changes and separate stress campaigns in the search history.
+
+Freeze economic acceptance separately from raw-return ranking: capital/exposure, horizon, benchmark, costs, risk/capacity limits and rejection criteria. A numerical winner can yield "no acceptable strategy". The design and analysis specialists cover that decision and search-wide uncertainty.
+
+Final evaluation of an official campaign uses `releaseCampaignFinal` with one absolute shared `finalAuthorityDirectory` across checkouts. The coordinator keeps final values out of explorer configuration, bundled helpers and input snapshots, and releases only the frozen official winner when requested. `withFinalHoldout` remains the lower-level helper. Failure consumes the release; further tuning needs genuinely untouched evidence, not a renamed claim.
 
 For capability questions or proposed extensions, inspect current code and the relevant economic contract. Consult `docs/RESEARCH_SKILLS.md` for the original conceptual mappings and prioritized additions; verify that a listed gap still exists before proposing implementation.

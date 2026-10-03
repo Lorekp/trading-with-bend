@@ -7,12 +7,12 @@ description: Run reproducible strategy or model campaigns in trading-with-bend w
 
 Keep every research attempt attributable, comparable and recoverable without taking a live worker's ownership.
 
-Paths are relative to the target `trading-with-bend` repository. Read `AGENTS.md` and `docs/RESEARCH.md`, then inspect current `src/experiments.mjs` / `src/search.mjs` interfaces and a nearby study worker. This skill adapts a 2026-10-03 documentation snapshot.
+Paths are relative to the target `trading-with-bend` repository. Read `AGENTS.md` and `docs/RESEARCH.md`, then inspect current campaign/registry exports and a nearby `evaluateStudy` worker. This skill adapts a 2026-10-03 documentation snapshot.
 
-For a new campaign or changed inputs, read [registration-and-artifacts.md](references/registration-and-artifacts.md). Build once before enqueueing. Use `gridJobs`, `enqueueExperiment` and `runQueue` for asynchronous workers, or the registered synchronous `runExperiment` path for genuinely synchronous work. Give changed code/data/seeds/configuration a fresh versioned study identity.
+For a new campaign or changed inputs, read [registration-and-artifacts.md](references/registration-and-artifacts.md). Build once before admission. Official multi-agent studies use `createCampaign().submit/seal/run/report`, with one coordinator owning specification, total budget, common inputs and final authority. Use raw `enqueueExperiment` / `runQueue` or synchronous `runExperiment` for focused diagnostics. Give changed code/data/seeds/configuration a fresh versioned study identity.
 
-For parallel capacity, worker failure, recovery or drift rejection, read [operations.md](references/operations.md). Coordinate the total process budget: queue concurrency is per runner. Keep failed/abandoned attempts in the population and use verified registry reads when reporting.
+For parallel capacity, worker failure or recovery, read [operations.md](references/operations.md). Coordinate shared admission as well as per-runner concurrency. Keep failed/abandoned attempts in the population and use verified official reports and registry reads when reporting.
 
-Pin helper modules, external models, both information/execution datasets, manifests and associated data files as dependencies. Use `context.writeArtifact` for immutable plan, configuration, model and evidence artifacts. Preserve the full audit through disk recording and summary reports for large runs.
+Declare helpers as dependencies and external files through `inputFiles`; official submissions freeze toolkit, installed locked package bytes and those inputs. Give exploration workers train/validation-only values. Use `context.writeArtifact` for immutable plan, configuration, model and evidence artifacts. Preserve full replay audits and regular strategy/control returns when uncertainty analysis needs them.
 
-Completion means registered outcomes and verified artifact references for the whole requested trial population, including pending/failed/abandoned statuses, plus the common comparison identities. A best-result JSON alone is not a completed campaign record.
+Official completion means sealed membership, every admission registered and terminal, and a verified immutable campaign report. Pending/unregistered work remains visibly incomplete. Report the whole population and the predeclared economic accept/reject decision separately from the official raw-return winner. Final release uses `releaseCampaignFinal` and the coordinator's shared authority only when requested.
