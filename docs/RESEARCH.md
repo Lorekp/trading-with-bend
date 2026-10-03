@@ -19,12 +19,15 @@ npm run research-demo
 
 The research demo launches six jobs with three concurrent worker processes:
 buy-and-hold, two moving-average settings, mean reversion and two ridge settings.
-They use the same synthetic dataset and validation window. Models use purged
+They use the same synthetic dataset and every validation fold. Models use purged
 training samples and one explicitly simulated millisecond of training/deployment
 latency. All strategies pay fees and use executable limit orders. Reports include
 open positions; no strategy is declared profitable based on this synthetic test.
-Final holdout rows remain unused. Individual jobs save reports, split plans and,
-for ML, model and regression artifacts in their attempt directories.
+Final holdout rows remain unused. Each fold resets capital and supplies historical
+observations for signal warmup without trading before validation. Every candidate
+is compared with cash and buy-and-hold on the same data and execution model.
+Individual jobs save complete studies, split plans and, for ML, a model and
+regression artifact for each fold in their attempt directories.
 
 `output/research-demo` is durable. Repeating the demo with unchanged code/specs
 reuses completed jobs. After editing shared code use a new registry/study identity,
@@ -48,6 +51,7 @@ Intentional identity collisions fail rather than silently replacing old evidence
 | `src/models.mjs` | Training-only standardization, ridge/OLS baseline, model/feature lineage, checked predictions and regression metrics |
 | `src/sequence-data.mjs`, `src/forecast.mjs` | Regular sequence/label construction, optional Python model adapters, portable weights and checked return forecasts; see [FORECASTING.md](FORECASTING.md) |
 | `src/evaluation.mjs` | Purged/embargoed walk-forward folds, persistent final-holdout release, regular return metrics, failure-preserving comparison |
+| `src/study.mjs` | All-fold validation replay, history-only warmup, reset accounts, explicit equity sampling, baselines and population-preserving selection |
 | `src/search.mjs` | Bounded deterministic parameter grids, validation-only search jobs |
 | `src/experiments.mjs` | Immutable manifests, atomic job claims, parallel processes, timeouts, logs, explicit abandoned recovery |
 | `src/index.mjs` | Convenience exports of the shared public toolkit |
@@ -270,6 +274,52 @@ degeneracy checks; external ML frameworks can replace it through worker modules
 while retaining data, artifact, execution and trial registration contracts.
 
 ## Reporting and verification
+
+`evaluateStudy({ samples, plan, protocol }, prepareFold)` owns the validation
+loop. The callback receives `{ fold, training, evaluation, protocol }`; training
+and evaluation are the verified artifacts from `foldRows`. It returns a
+`strategy`, a `createReplay({ variant })` factory producing a fresh
+`{ informationSource, executionVenue }`, and named `baselines` such as cash and
+buy-and-hold. Optional `metadata` records fitted model or regression evidence.
+The factory must use the same data, instrument, execution configuration and
+model for candidate and baselines. It must create a fresh account every time.
+
+The protocol is explicit:
+
+```js
+const protocol = {
+  warmup: 'history-only', account: 'reset-per-fold',
+  intervalMs: '60000', periodsPerYear: 365 * 24 * 60,
+  maxStalenessMs: '60000'
+};
+```
+
+Supply preceding observations through the information source when a signal needs
+warmup. The runner accumulates their bounded history but does not invoke the
+strategy before validation. Strategy callbacks must derive warmup from that
+history; mutable callback state is not trained during warmup. No observation
+after the evaluation endpoint is delivered. Accounts and strategy instances are
+independent per fold. This policy does not simulate continuous cross-fold
+positions or compounded deployment returns.
+
+`sampleEquity(report, { startTime, endTime, intervalMs, maxStalenessMs })` samples
+the last valuation at or before each grid point. The last record at a shared
+timestamp wins; future records never fill earlier grid points. Both endpoints
+must lie on the grid. Missing or stale samples, unmarked or nonpositive equity
+inside the evaluation window, and deficit accounts are rejected. There is no
+interpolation. File-recorded valuations are read incrementally. The resulting
+sample array is proportional to the requested grid, not to market-event count.
+`regularReturns` retains its stricter pure interface and never resamples implicitly.
+
+Study aggregation sums independent-fold P&L and divides by their summed initial
+capital. It records exact rational excess returns against each baseline and
+keeps per-fold numerical metrics; it does not splice fold equities or average
+Sharpes. `selectStudy([{ id, status, study, error }])` selects the highest exact
+aggregate validation return and breaks ties by trial ID. It retains failed,
+abandoned and invalid trials, rejects mixed data/plan/protocol/execution identities,
+and never selects from a final partition. Registry attempt records remain the
+complete history of retried work. Release the chosen strategy only through the
+existing `withFinalHoldout` gate; `evaluateStudy` never opens final data.
 
 Accounting remains integer-based. `regularReturns` additionally computes a
 numerical Sharpe only after the caller declares a regular interval and annual

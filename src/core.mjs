@@ -32,6 +32,21 @@ export function canonical(value) {
 }
 export const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonical(value)).digest('hex');
 
+/** Exactly hash(array), without retaining the array or its serialized form. */
+export class CanonicalArrayHash {
+  #hash = createHash('sha256').update('[');
+  #count = 0;
+  get count() { return this.#count; }
+  push(value) {
+    if (this.#count) this.#hash.update(',');
+    this.#hash.update(canonical(value)); this.#count++;
+  }
+  digest() { return this.#hash.copy().update(']').digest('hex'); }
+}
+
+/** Reuse only objects recursively frozen by this module, never shallow freezes. */
+export function immutableCopy(value) { return value && typeof value === 'object' && DEEP_FROZEN.has(value) ? value : freeze(structuredClone(value)); }
+
 // Only values recursively frozen here may bypass future recursive traversal.
 // Object.isFrozen alone is insufficient: callers can shallow-freeze containers.
 const DEEP_FROZEN = new WeakSet();

@@ -1,9 +1,21 @@
 import { replayQuotes as runStrategy } from '../replay-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { Backtest, orders } from '../../src/framework.mjs';
 import { MAX_NAT } from '../../src/core.mjs';
 import { buyAndHold, movingAverageCrossover, meanReversion, targetPosition } from '../../src/strategies.mjs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { hash, json } from '../../src/core.mjs';
+import { readReplayAudit, openReplayAudit } from '../../src/recording.mjs';
+import { prepareQuoteData, openQuoteData } from '../../src/quote-data.mjs';
+import { quoteInformationSource, InformationSource } from '../../src/information-source.mjs';
+import { QuoteExecutionVenue } from '../../src/execution-venue.mjs';
+import { runStrategy as replay } from '../../src/replay.mjs';
+import { sampleEquity } from '../../src/study.mjs';
 
 test('default storage keeps historical orders out of matching across 6000 submit/cancel cycles', () => {
   const run = new Backtest({ ...config, cancelLatencyMs: '0' }, { traceMode: 'compact' });
@@ -330,4 +342,212 @@ test('quote callbacks retain only working orders while reports and checkpoints r
   assert.equal(active.workingOrders.length, 1);
   assert.deepEqual(report, reference.report());
   assert.deepEqual(Backtest.resume(active.checkpoint()).report(), report);
+});
+
+const auditDisposers = new WeakMap();
+const auditCleanup = (t, dispose) => auditDisposers.get(t).push(dispose);
+function auditDirectory(t) {
+  const parent = resolve(tmpdir()), directory = mkdtempSync(join(parent, 'bend-replay-audit-'));
+  const disposers = []; auditDisposers.set(t, disposers);
+  t.after(() => { for (const dispose of disposers.reverse()) dispose(); assert.equal(dirname(directory), parent); rmSync(directory, { recursive: true, force: true }); });
+  return directory;
+}
+const withoutAudit = ({ audit, ...report }) => report;
+const plain = value => JSON.parse(json(value));
+function auditEvents() {
+  const base = (id, type, time) => ({ id, type, time: String(time), sequence: String(time + 1), symbol: 'ETHUSDT', currency: 'USDT' });
+  return [
+    { ...base('buy', 'submit', 0), orderId: '1', side: 'buy', limit: '100', quantity: '2' },
+    { ...base('fill', 'tick', 1), sourceTime: '1', bid: '99', ask: '100', bidLots: '2', askLots: '2' },
+    { ...base('cancel-completed', 'cancel', 2), orderId: '1' },
+    base('cancel-effective', 'clock', 4),
+    { ...base('sell', 'submit', 5), orderId: '2', side: 'sell', limit: '100', quantity: '2' },
+    { ...base('partial', 'tick', 6), sourceTime: '6', bid: '100', ask: '101', bidLots: '1', askLots: '1' },
+    { ...base('cancel-partial', 'cancel', 7), orderId: '2' },
+    { ...base('cancellation-wins', 'tick', 9), sourceTime: '9', bid: '100', ask: '101', bidLots: '1', askLots: '1' },
+    { ...base('rejected', 'submit', 10), orderId: '3', side: 'sell', limit: '100', quantity: '99' }
+  ];
+}
+
+test('disk audit preserves complete exact replay and historical cancellations with bounded summary reporting', t => {
+  const root = auditDirectory(t), options = { traceMode: 'compact' }, events = auditEvents();
+  const memory = new Backtest(config, options), disk = new Backtest(config, { ...options, auditDirectory: join(root, 'disk') });
+  auditCleanup(t, () => disk.abort());
+  for (const event of events) {
+    assert.deepEqual(disk.step(event), memory.step(event));
+    assert.deepEqual(disk.step(event), { duplicate: true });
+    assert.deepEqual(disk.ledger, memory.ledger);
+  }
+  const expected = memory.report(), summary = disk.report();
+  for (const key of ['orders', 'fills', 'trace', 'valuations', 'events']) assert.ok(!Object.hasOwn(summary, key));
+  assert.equal(summary.dataQuality.acceptedUniqueEvents, events.length);
+  assert.equal(summary.traceHash, expected.traceHash);
+  assert.equal(summary.manifest.datasetHash, hash(events));
+  assert.deepEqual(summary.performance, expected.performance);
+  const grid = { startTime: '1', endTime: '9', intervalMs: '4', maxStalenessMs: '4' };
+  assert.deepEqual(sampleEquity(summary, grid), sampleEquity(expected, grid));
+  for (const name of ['orders', 'fills', 'trace', 'valuations']) assert.deepEqual(plain([...readReplayAudit(summary, name)]), expected[name]);
+  assert.deepEqual([...readReplayAudit(summary, 'events')], events);
+  assert.deepEqual(withoutAudit(disk.report({ detail: 'full' })), expected);
+  assert.deepEqual(summary, disk.report());
+  assert.throws(() => disk.step({ ...events.at(-1), id: 'late', orderId: '4', time: '11', sequence: '12' }), { code: 'AUDIT_CLOSED' });
+});
+
+test('disk checkpoint is an immutable prefix and resumes into a distinct audit with exact continuation', t => {
+  const root = auditDirectory(t), events = auditEvents();
+  const original = new Backtest(config, { auditDirectory: join(root, 'original') }); auditCleanup(t, () => original.abort());
+  original.run(events.slice(0, 3));
+  const checkpoint = original.checkpoint(), bytes = readFileSync(checkpoint.audit.manifestPath);
+  const resumed = Backtest.resume(checkpoint, { auditDirectory: join(root, 'resumed') }); auditCleanup(t, () => resumed.abort());
+  original.run(events.slice(3)); resumed.run(events.slice(3));
+  assert.deepEqual(withoutAudit(original.report({ detail: 'full' })), withoutAudit(resumed.report({ detail: 'full' })));
+  assert.deepEqual(readFileSync(checkpoint.audit.manifestPath), bytes);
+  assert.deepEqual([...readReplayAudit(checkpoint.audit, 'events')], events.slice(0, 3));
+  assert.throws(() => Backtest.resume(checkpoint), { code: 'CHECKPOINT_OPTIONS' });
+  assert.throws(() => Backtest.resume(checkpoint, { auditDirectory: join(root, 'original') }), { code: 'EEXIST' });
+});
+
+test('disk failures preserve ID rules and never publish incomplete or corrupt audits', t => {
+  const root = auditDirectory(t), events = auditEvents();
+  for (const [name, event, code] of [
+    ['collision', { ...events[0], quantity: '3' }, 'EVENT_ID_COLLISION'],
+    ['reuse-rejected', { ...events.at(-1), id: 'second-submit', time: '11', sequence: '12' }, 'DUPLICATE_ORDER']
+  ]) {
+    const directory = join(root, name), run = new Backtest(config, { auditDirectory: directory }); auditCleanup(t, () => run.abort());
+    run.run(events); const before = run.ledger;
+    assert.throws(() => run.step(event), { code }); assert.deepEqual(run.ledger, before);
+    assert.throws(() => run.report(), { code: 'AUDIT_FAILED' });
+    assert.ok(!existsSync(join(directory, 'manifest.json')));
+    assert.throws(() => openReplayAudit(join(directory, 'manifest.json')), { code: 'ENOENT' });
+  }
+  const directory = join(root, 'publish-failure'), run = new Backtest(config, { auditDirectory: directory }); auditCleanup(t, () => run.abort());
+  run.run(events); writeFileSync(join(directory, 'manifest.json'), 'occupied', { flag: 'wx' });
+  assert.throws(() => run.report(), { code: 'EEXIST' });
+  assert.throws(() => run.report(), { code: 'AUDIT_FAILED' });
+  assert.throws(() => openReplayAudit(join(directory, 'manifest.json')));
+  const good = new Backtest(config, { auditDirectory: join(root, 'corrupt') }).run(events).report();
+  const file = join(dirname(good.audit.manifestPath), good.audit.file), data = readFileSync(file);
+  data[data.length - 1] ^= 1; writeFileSync(file, data);
+  assert.throws(() => [...readReplayAudit(good, 'events')], { code: 'AUDIT_CORRUPT' });
+});
+
+test('a durability failure after writing manifest bytes cannot publish an audit or checkpoint', t => {
+  const root = auditDirectory(t), events = auditEvents();
+  for (const operation of ['report', 'checkpoint']) {
+    const directory = join(root, operation), run = new Backtest(config, { auditDirectory: directory }).run(events);
+    auditCleanup(t, () => run.abort());
+    const original = fs.writeFileSync;
+    let injected = 0;
+    fs.writeFileSync = (path, ...args) => {
+      const result = original(path, ...args);
+      if (dirname(String(path)) === directory && String(path).includes('.json')) {
+        injected++;
+        throw Object.assign(new Error('Durability failure after manifest bytes were written'), { code: 'EIO' });
+      }
+      return result;
+    };
+    syncBuiltinESMExports();
+    try { assert.throws(() => run[operation](), { code: 'EIO' }); }
+    finally { fs.writeFileSync = original; syncBuiltinESMExports(); }
+    assert.equal(injected, 1);
+    assert.deepEqual(readdirSync(directory).filter(name => name.endsWith('.json')), [], 'Only incomplete files may survive failed publication');
+    assert.throws(() => openReplayAudit(join(directory, 'manifest.json')), { code: 'ENOENT' });
+    if (operation === 'report') assert.throws(() => run.report(), { code: 'AUDIT_FAILED' });
+    else {
+      const saved = run.checkpoint();
+      assert.deepEqual([...readReplayAudit(saved.audit, 'events')], events);
+    }
+  }
+});
+
+test('prepared data, disk replay and checkpoint restore support paths longer than Windows MAX_PATH', async t => {
+  const root = auditDirectory(t), longRoot = join(root, `experiment-${'a'.repeat(70)}`, `attempt-${'b'.repeat(70)}`, `artifact-${'c'.repeat(70)}`);
+  assert.ok(longRoot.length > 260);
+  const quotes = ticks(8).map(quote => ({ ...quote, bid: '99', ask: '100' }));
+  const dataset = await prepareQuoteData(quotes, { instrument: config.instrument, directory: join(longRoot, 'quotes') });
+  auditCleanup(t, () => dataset.close());
+  const venue = new QuoteExecutionVenue({ id: 'long-path-venue', config, ticks: dataset, maxPositionLots: '1', auditDirectory: join(longRoot, 'replay') });
+  auditCleanup(t, () => venue.abort());
+  const result = replay(quoteInformationSource({ id: 'long-path-source', instrument: config.instrument, ticks: dataset }), venue, targetPosition('1'));
+  const checkpoint = venue.backtest.checkpoint();
+  const restored = Backtest.resume(checkpoint, { auditDirectory: join(longRoot, 'restored') });
+  auditCleanup(t, () => restored.abort());
+  const report = result.report();
+  assert.ok(report.audit.manifestPath.length > 260);
+  assert.ok([...readReplayAudit(report, 'fills')].length > 0);
+  assert.deepEqual(withoutAudit(restored.report({ detail: 'full' })), withoutAudit(venue.backtest.report({ detail: 'full' })));
+  const reopened = openQuoteData(dataset.manifest.audit.manifestPath);
+  try { assert.deepEqual([...reopened.rows()], quotes); } finally { reopened.close(); }
+});
+
+test('empty quote preparation validates instrument units before creating an artifact', async t => {
+  const root = auditDirectory(t);
+  for (const [name, instrument] of [['missing', undefined], ['zero-lot', { ...config.instrument, lotSize: '0' }]]) {
+    const directory = join(root, name);
+    await assert.rejects(prepareQuoteData([], { instrument, directory }), { code: 'DATA_INSTRUMENT' });
+    assert.equal(existsSync(directory), false);
+  }
+  const valid = await prepareQuoteData([], { instrument: config.instrument, directory: join(root, 'valid-empty') });
+  try { assert.deepEqual([...valid.rows()], []); assert.equal(valid.manifest.datasetHash, hash([])); }
+  finally { valid.close(); }
+});
+
+test('admitted quotes supply independent reusable cursors and reserve future market IDs exactly', async t => {
+  const root = auditDirectory(t), quotes = ticks(8);
+  quotes[2].id = 'strategy-2'; quotes[3].id = 'strategy-2-'; quotes[4].id = 'venue-clock-3';
+  const dataset = await prepareQuoteData((async function* () { for (const quote of quotes) yield quote; })(), { instrument: config.instrument, directory: join(root, 'data') });
+  auditCleanup(t, () => dataset.close());
+  const informationSource = quoteInformationSource({ id: 'shared-source', instrument: config.instrument, ticks: dataset });
+  const execute = input => replay(quoteInformationSource({ id: 'shared-source', instrument: config.instrument, ticks: input }),
+    new QuoteExecutionVenue({ id: 'shared-venue', config, ticks: input, maxPositionLots: '2', traceMode: 'compact' }), targetPosition('2'));
+  const memory = execute(quotes), first = execute(dataset), second = execute(dataset);
+  assert.deepEqual(first.report(), memory.report()); assert.deepEqual(second.report(), memory.report());
+  assert.equal(first.targetsHash, hash(quotes.map(row => ({ time: row.time, target: '2' }))));
+  const a = informationSource.observations(), b = informationSource.observations();
+  assert.equal(a.next().value.data.id, quotes[0].id); assert.equal(a.next().value.data.id, quotes[1].id);
+  assert.equal(b.next().value.data.id, quotes[0].id); a.return(); b.return();
+  const venue = new QuoteExecutionVenue({ id: 'clock-venue', config, ticks: dataset, maxPositionLots: '2', auditDirectory: join(root, 'clock-replay') });
+  auditCleanup(t, () => venue.abort());
+  const source = new InformationSource({ id: 'clock-source', instrument: config.instrument,
+    observations: [0, 7, 8].map(time => ({ time: String(time), availableAt: String(time), data: { time: String(time) } })) });
+  const report = replay(source, venue, targetPosition('2')).report();
+  const events = [...readReplayAudit(report, 'events')];
+  assert.ok(events.some(event => event.type === 'submit' && event.id === 'strategy-2--'));
+  assert.equal(new Set(events.map(event => event.id)).size, events.length);
+  assert.throws(() => quoteInformationSource({ id: 'bad-units', instrument: { ...config.instrument, lotSize: '1' }, ticks: dataset }), { code: 'UNIT_MISMATCH' });
+  const reopened = openQuoteData(dataset.manifest.audit); assert.deepEqual([...reopened.rows()], quotes); reopened.close();
+});
+
+test('upstream iterator failures invalidate partial replay and failed data admission leaves no manifest', async t => {
+  const root = auditDirectory(t), quotes = ticks(3);
+  for (const disk of [false, true]) {
+    const run = new Backtest(config, disk ? { auditDirectory: join(root, 'input-error') } : {}); auditCleanup(t, () => run.abort());
+    const source = (function* () { yield quotes[0]; throw new Error('read failure'); })();
+    assert.throws(() => run.run(source), /read failure/);
+    assert.throws(() => run.report(), /failed|error|aborted/i);
+  }
+  const venue = new QuoteExecutionVenue({ id: 'read-failure', config, ticks: quotes, maxPositionLots: '1', auditDirectory: join(root, 'strategy-error') });
+  auditCleanup(t, () => venue.abort());
+  const source = { instrument: config.instrument, manifest: { id: 'failing-source' },
+    *observations() { yield { time: '0', availableAt: '0', data: quotes[0] }; throw new Error('information read failure'); } };
+  assert.throws(() => replay(source, venue, targetPosition('1')), /information read failure/);
+  assert.throws(() => venue.backtest.report(), { code: 'AUDIT_FAILED' });
+  const directory = join(root, 'admission-error');
+  await assert.rejects(prepareQuoteData((async function* () { yield quotes[0]; throw new Error('download interrupted'); })(), { instrument: config.instrument, directory }), /download interrupted/);
+  assert.ok(!existsSync(join(directory, 'manifest.json')));
+});
+
+test('large disk replay returns bounded summary while every audit record remains iterable', async t => {
+  const root = auditDirectory(t), count = 6000;
+  const quotes = (function* () { for (let index = 0; index < count; index++) yield { ...ticks(1)[0], id: `large-${index}`, time: String(index), sourceTime: String(index), sequence: String(index + 1), bid: '100', ask: '100' }; })();
+  const dataset = await prepareQuoteData(quotes, { instrument: config.instrument, directory: join(root, 'large-data') }); auditCleanup(t, () => dataset.close());
+  const venue = new QuoteExecutionVenue({ id: 'large-venue', config, ticks: dataset, maxPositionLots: '1', auditDirectory: join(root, 'large-replay') }); auditCleanup(t, () => venue.abort());
+  const report = replay(quoteInformationSource({ id: 'large-information', instrument: config.instrument, ticks: dataset }), venue,
+    targetPosition(({ ledger }) => ledger.quantity === 0n ? '1' : '0')).report();
+  assert.ok(JSON.stringify(report).length < 30000);
+  assert.equal(report.audit.streams.fills.count, count - 1);
+  assert.equal(report.audit.streams.orders.count, count);
+  assert.ok(!Object.hasOwn(report, 'orders') && !Object.hasOwn(report, 'trace') && !Object.hasOwn(report, 'valuations'));
+  let seen = 0; for (const fill of readReplayAudit(report, 'fills')) { assert.equal(fill.quantity, 1n); seen++; }
+  assert.equal(seen, count - 1);
 });

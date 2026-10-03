@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import { hashFile } from './archive.mjs';
 import { hash, nat, json, requireThat, freeze } from './core.mjs';
 import { verifiedRuntimeProvenance } from './provenance.mjs';
-import { InformationSource, validateObservation } from './information-source.mjs';
+import { InformationSource, prepareInformationSource, validateObservation } from './information-source.mjs';
 import { dataVisible } from './policies.mjs';
 import { containedPath, textLines, verifyMarketFile, unchangedFile } from './market-archives.mjs';
 
@@ -133,15 +133,21 @@ export async function* readProcessedData({ manifestPath, startTime = '0', endTim
   }
 }
 
-/** Small, bounded bridge to the existing strategy InformationSource interface. */
+/** Admit processed shards into a reusable source; disk admission bounds memory. */
 export async function loadProcessedInformationSource(options) {
-  const manifest = await processedManifest(options.manifestPath, options), observations = [], maxRows = options.maxRows ?? 100000;
+  const manifest = await processedManifest(options.manifestPath, options);
+  const source = { id: `processed:${manifest.recipe.source.venue}:${manifest.recipe.source.kind}`,
+    instrument: manifest.recipe.source.instrument, datasetHash: manifest.datasetHash };
+  if (options.directory !== undefined) {
+    requireThat(options.maxRows === undefined, 'DATA_SIZE', 'maxRows applies only to in-memory loading; omit it when preparing a directory');
+    return prepareInformationSource({ ...source, observations: readProcessedData(options), directory: options.directory });
+  }
+  const observations = [], maxRows = options.maxRows ?? 100000;
   requireThat(Number.isSafeInteger(maxRows) && maxRows > 0, 'DATA_SIZE', 'maxRows must be a positive integer');
   for await (const record of readProcessedData(options)) {
     requireThat(observations.length < maxRows, 'DATA_SIZE', 'Use streaming reads for larger datasets'); observations.push(record);
   }
-  return new InformationSource({ id: `processed:${manifest.recipe.source.venue}:${manifest.recipe.source.kind}`, instrument: manifest.recipe.source.instrument,
-    datasetHash: manifest.datasetHash, observations });
+  return new InformationSource({ ...source, observations });
 }
 
 /** Inclusive as-of lookup; stale/missing observations are explicit nulls. */

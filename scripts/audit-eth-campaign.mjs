@@ -3,7 +3,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { listExperiments, readExperimentResult } from '../src/experiments.mjs';
-import { hash } from '../src/core.mjs';
+import { hash, json } from '../src/core.mjs';
+import { readReplayAudit } from '../src/recording.mjs';
 import { validateRidgeModel } from '../src/models.mjs';
 
 const root = resolve(process.argv[2] || 'output/eth-september-verified-v03');
@@ -13,6 +14,10 @@ for (const job of jobs) {
   assert.equal(job.status, 'completed', `${job.key}: retain and investigate failed or incomplete jobs`);
   const result = readExperimentResult(root, job.key); // Also verifies every artifact digest.
   const report = JSON.parse(readFileSync(join(job.attempts.at(-1).outputDirectory, 'report.json'), 'utf8'));
+  // This explicit diagnostic materializes the audit for independent cross-record
+  // checks; ordinary campaign results remain bounded summaries.
+  if (report.audit) for (const name of ['trace','orders','fills','valuations']) report[name]=JSON.parse(json([...readReplayAudit(report,name)]));
+  if (report.barReplay.executionAudit) report.barReplay.executionInputs=JSON.parse(json([...readReplayAudit(report.barReplay.executionAudit,'executionInputs')]));
   assert.equal(report.status, 'valid-under-declared-model');
   assert.equal(report.barReplay.inputBarsHash, result.dataHash);
   assert.equal(hash(report.trace), report.traceHash);

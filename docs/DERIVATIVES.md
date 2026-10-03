@@ -43,12 +43,18 @@ requires a new study directory/identity; existing manifests reject drift.
 
 For your own normalized data, enqueue
 `experiments/derivatives/worker.mjs` through `gridJobs`. Its base configuration is
-`{datasetPath, config, split}` and its parameter space is
+`{datasetPath, config, split, evaluationProtocol}` and its parameter space is
 `{targetLots: ['-2', '0', '2']}`. The dataset JSON contains `{data, samples}`;
 samples follow `walkForwardSplits` (`id`, `time`, `availableAt`,
 `labelAvailableAt`). Declare the dataset path in `dependencies`. A model worker
 can reuse `evaluateWindow` or compose the venue directly; fitting must still use
 `foldRows(..., 'train', 'train')`. The supplied constant baseline does not train.
+The study module runs cash and hold baselines in fresh accounts, samples equity
+at the declared regular interval, and retains the full trial population during
+selection. For example, minute data can declare
+`{warmup:'history-only', account:'reset-per-fold', intervalMs:'60000',
+periodsPerYear:525600, maxStalenessMs:'120000'}`. Choose those conventions to match
+the dataset; the synthetic demo explicitly uses millisecond sampling.
 
 ## Interface and units
 
@@ -135,7 +141,7 @@ without a generated Bend runtime. Every event has:
 | --- | --- | --- |
 | `quote` | `bid`, `ask`, `bidLots`, `askLots` | Fresh executable prices and new per-side liquidity budgets |
 | `mark` | `price` | Risk/equity mark; checks maintenance margin |
-| `funding` | `price`, signed `ratePpm` | Funding settlement price and rate in millionths, for the current position |
+| `funding` | `price`, `rate: {numerator, denominator}` | Exact signed funding fraction for the current position |
 | `settlement` | `price` | Mandatory full cash settlement at dated-future expiry |
 
 Events must have nondecreasing timestamps and strictly increasing sequences;
@@ -143,12 +149,35 @@ Events must have nondecreasing timestamps and strictly increasing sequences;
 duplicate IDs are ignored; changed duplicates fail. Off-tick/crossed quotes,
 cross-instrument events and decision times outside coverage fail.
 
+A funding fraction uses canonical integer strings, a positive denominator and
+magnitude at most one. Fractions are reduced at admission without rounding.
+For example, 0.92 ppm is `{numerator:'23', denominator:'25000000'}`; no integer-ppm
+conversion occurs. The numerator and denominator may each contain up to 80
+digits; the final posting remains subject to the ledger's magnitude limit.
+
 A perpetual requires exactly one funding event at every
 `fundingOffsetMs + n * fundingIntervalMs` within coverage, including explicit
 zero rates. Missing data never means zero funding. Positive rates debit longs
 and credit shorts; negative rates reverse this. Funding uses its supplied
 settlement price, not the trade quote; liquidation still uses the risk mark.
-The model uses one fixed funding schedule per dataset.
+The model uses one fixed funding schedule per dataset. Optional contract field
+`fundingTimestampToleranceMs` defaults to zero and must be less than the interval.
+It permits an explicitly bounded delay after a scheduled slot, accommodating
+archive timestamps such as 08:00:00.005. Execution retains the actual timestamp;
+funding is never moved earlier. Two events assigned to the same slot fail, and
+coverage still requires each due slot. Variable exchange schedules must be
+split into separately declared datasets.
+
+`validateDerivativeData` returns an immutable admitted dataset. Reuse that exact
+object across venues to reuse validation, identity and timestamp indexes. A
+different instrument or contract is rejected; independent account/risk settings
+may vary. Passing a plain copied object performs fresh admission.
+
+An optional venue `window: {startTime, endTime}` creates a fresh account for an
+inclusive subset. Binary search initializes the latest strictly earlier mark,
+quote and expiry state, then only window events are processed. No historical
+orders, exposure, funding payments or valuations leak across folds. Whole-dataset
+schedule validation remains mandatory, and decisions outside the window fail.
 
 A future declares `expiryTime` instead of funding interval/offset. Funding events
 are rejected. Coverage containing expiry requires exactly one settlement event at
@@ -161,6 +190,57 @@ events. Supply truthful venue ordering; all events at a decision timestamp run
 before its signal. Cancellation effective at an event wins the tie. Fills require
 strictly newer timestamps than decisions and must satisfy arrival latency and
 the limit. They execute at the supplied quote, without a second slippage debit.
+
+## Processed market data
+
+`loadProcessedDerivativeData` joins independently verified processed mark,
+funding and quote datasets. It currently admits canonical linear ETH/USDT
+perpetual data with 0.001 ETH lots, microUSDT settlement units, multiplier 1 and
+price tick 10. Its interface requires `config`, `quoteManifestPath`,
+`markManifestPath`, `fundingManifestPath`, inclusive `startTime`/`endTime`, and an
+explicit liquidity assumption:
+
+- `{model:'displayed-size', participationBps:'100'}` uses a fraction of displayed
+  book size on each update, with the original bid/ask spread.
+- `{model:'bar-volume', participationBps:'10', halfSpreadTicks:'1'}` creates an
+  explicitly declared close-price proxy at each completed bar's publication
+  time, with a symmetric spread and a fraction of bar volume on each side.
+
+Each update replenishes its assumed liquidity budget. Neither model reproduces
+queue position, persistent book depletion, market impact or an exchange fill
+guarantee. Bars cannot supply actual executable quotes. All series must belong
+to the same venue and declared market. Delayed funding/book observations cannot
+be used as executable events. Equal-time cross-series order is explicitly mark,
+funding, quote; input series are never sorted to repair regressions.
+
+Reference mark closes become usable at publication time. Funding uses the latest
+published fresh mark as its explicitly assumed settlement price. Risk marks
+convert from the source's 1e8 price scale to microUSDT per lot. `markRounding`
+defaults to `'exact'` and rejects unrepresentable prices; explicitly selecting
+`'floor'` records that precision assumption. Funding fractions never round.
+The return value `{data, provenance, identity}` retains source identities and
+assumptions; use `identity` for the venue's `id` and persist `provenance` with
+study artifacts. Admission is bounded by `maxEvents` (default 1,000,000), and
+retains one shared normalized dataset; it is not a disk-streaming derivative
+dataset. Select a smaller interval when it exceeds the cap.
+
+After building, this local-data validation path uses the downloaded Binance
+archives, actual funding/risk marks and an explicit bar execution proxy:
+
+```powershell
+node examples/processed-derivatives.mjs data/binance/um/ETHUSDT/2026-09/manifest.json output/processed-derivatives
+```
+
+Optional third/fourth arguments supply UTC start and exclusive end timestamps.
+The example defaults to September 2, starting one minute after midnight so the
+first scheduled funding payment has an earlier published mark. It pins an
+8-hour schedule and 10 ms timestamp tolerance, allows explicit mark flooring,
+and queues a registered replay through `experiments/derivatives/processed-worker.mjs`.
+The processed manifests and every shard are pinned as dependencies. The attempt
+retains its disk audit, summary report and admission assumptions; printed output
+links the report inside the registry. Failed attempts remain registered. Use a
+fresh output directory after source changes; processed identities reject recipe
+drift.
 
 ## Margin, orders and liquidation
 
@@ -201,8 +281,20 @@ the cash engine's checkpoints do not serialize this venue.
 
 ## Validation and verification scope
 
-Reports retain complete orders, fills, postings, valuations, source/config/data
-hashes, build evidence, rounding and liquidation assumptions. They reconcile
+By default reports retain complete orders, fills, postings, valuations,
+source/config/data hashes, build evidence, rounding and liquidation assumptions.
+For sustained runs, set `auditDirectory` to a new directory on each venue.
+Historical orders, fills, postings and valuations then live in the indexed disk
+audit, and `report()` returns metrics plus `audit.streams` counts/hashes without
+large arrays. The immutable audit is sealed before a successful report is
+returned. Use `readReplayAudit(report.audit, 'fills')` for verified iteration;
+`venue.report({detail:'full'})` explicitly hydrates all arrays and uses memory
+proportional to the complete history. Memory and disk recording preserve the
+same economic outputs and `traceHash`. A failed or aborted disk recording cannot
+be published as a successful replay. The processed-data example uses this disk
+recording mode and retains the audit beside its summary report.
+
+Both recording modes reconcile
 `cash = initialCash + realizedPnl + funding - fees` and
 `equity = cash + unrealizedPnl`. Valuations include market events and decision
 times between events (with `eventId: null`). A stale open-position valuation

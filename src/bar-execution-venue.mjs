@@ -2,6 +2,8 @@ import { checked, hash, nat, requireThat, freeze as freezeData } from './core.mj
 import { barExecutionAllowed, cappedLots } from './policies.mjs';
 import { validateBars } from './bars.mjs';
 import { QuoteExecutionVenue } from './execution-venue.mjs';
+import { ReplayRecording } from './recording.mjs';
+import { join } from 'node:path';
 
 const ceilDiv = (value, denominator) => (value + denominator - 1n) / denominator;
 function spread(price, bps, tick) {
@@ -14,10 +16,11 @@ function spread(price, bps, tick) {
 /** Explicit cash-price proxy over the execution venue's own bars. */
 export class BarExecutionVenue {
   #venue; #bars; #cursor = 0; #lastBar = null; #collar; #tickSize; #assumptions; #evidence;
+  #recording;
   constructor(options) {
-    requireThat(options && Object.keys(options).every(key => ['id', 'config', 'bars', 'maxPositionLots', 'halfSpreadBps', 'participationBps', 'maxLiquidityLots', 'limitBufferBps', 'executionDelayMs', 'traceMode', 'orderStorage'].includes(key)), 'BAR_OPTION', 'Unknown bar execution option');
+    requireThat(options && Object.keys(options).every(key => ['id', 'config', 'bars', 'maxPositionLots', 'halfSpreadBps', 'participationBps', 'maxLiquidityLots', 'limitBufferBps', 'executionDelayMs', 'traceMode', 'orderStorage', 'auditDirectory'].includes(key)), 'BAR_OPTION', 'Unknown bar execution option');
     const { id, config, bars, maxPositionLots, halfSpreadBps = '2', participationBps = '10', maxLiquidityLots = '10000',
-      limitBufferBps = '100', executionDelayMs = '1', traceMode = 'compact', orderStorage = 'active' } = options;
+      limitBufferBps = '100', executionDelayMs = '1', traceMode = 'compact', orderStorage = 'active', auditDirectory } = options;
     nat(maxPositionLots, 'maxPositionLots'); nat(maxLiquidityLots, 'maxLiquidityLots');
     const half = nat(halfSpreadBps, 'halfSpreadBps'), participation = nat(participationBps, 'participationBps');
     this.#collar = nat(limitBufferBps, 'limitBufferBps'); this.#tickSize = nat(config.instrument.priceTick, 'priceTick', true);
@@ -42,7 +45,7 @@ export class BarExecutionVenue {
       evidence.push({ eventId: `bar-open-${index}`, executionTime: String(executionTime), openTime: bar.openTime,
         sourceOpen: bar.open, priorAvailableAt: previous?.availableAt ?? null, priorVolumeLots: previous?.volumeLots ?? '0', ...opening, budgetPerSide: liquidity });
     }
-    this.#venue = new QuoteExecutionVenue({ id, config, ticks, maxPositionLots, traceMode, orderStorage, submitAtEnd: false });
+    this.#venue = new QuoteExecutionVenue({ id, config, ticks, maxPositionLots, traceMode, orderStorage, submitAtEnd: false, auditDirectory });
     this.instrument = this.#venue.instrument;
     this.backtest = this.#venue.backtest;
     this.#assumptions = freezeData({ model: 'completed-bar-next-open-cash-price-proxy-v1',
@@ -53,7 +56,9 @@ export class BarExecutionVenue {
       limits: 'Execution-venue completed-close collar; gaps may not fill; pending cancellations may miss openings',
       stops: 'No assumed intrabar high/low ordering', costs: 'Modeled spread plus venue-configured fixed fee per filled lot',
       halfSpreadBps, participationBps, maxLiquidityLots, limitBufferBps, executionDelayMs, maxPositionLots, orderStorage });
-    this.#evidence = freezeData(evidence);
+    this.#recording = new ReplayRecording(auditDirectory === undefined ? undefined : join(auditDirectory,'bar-inputs'));
+    this.#evidence = this.#recording.series('executionInputs');
+    this.#recording.transaction(()=>{ for(const item of evidence) this.#evidence.push(item); });
     this.manifest = freezeData({ ...this.#venue.manifest, model: this.#assumptions.model,
       datasetHash: hash(this.#bars), configHash: hash({ config: this.backtest.config, assumptions: this.#assumptions }) });
     Object.freeze(this);
@@ -68,7 +73,13 @@ export class BarExecutionVenue {
     this.#venue.reconcileTarget(target, time, bar ? { time: bar.availableAt, ...spread(BigInt(bar.close), this.#collar, this.#tickSize) } : null);
   }
   finish(time) { this.#venue.finish(time); }
-  report() {
-    return { ...this.#venue.report(), barReplay: { assumptions: this.#assumptions, executionInputs: this.#evidence } };
+  abort() { this.#venue.abort(); this.#recording.abort(); }
+  report(options = {}) {
+    const detail = options.detail ?? (this.#recording.disk ? 'summary' : 'full');
+    const report = this.#venue.report(options);
+    const executionAudit = this.#recording.disk ? this.#recording.seal({model:this.#assumptions.model}) : null;
+    return { ...report, barReplay: { assumptions: this.#assumptions,
+      ...(detail==='full' ? {executionInputs:freezeData(this.#evidence.slice())} : {}),
+      ...(executionAudit ? {executionAudit} : {}) } };
   }
 }

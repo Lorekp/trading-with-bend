@@ -28,6 +28,21 @@ export interface InformationSource<Data = Record<string, unknown>> {
   observations(): Iterable<Observation<Data>>;
 }
 
+/** Prepared sources own disk cursors; close after all replays finish. */
+export interface PreparedInformationSource<Data = Record<string, unknown>> extends InformationSource<Data> {
+  close(): void;
+}
+
+export interface RecordingOptions {
+  /** Exclusive new directory. Summary reports reference the complete indexed audit. */
+  auditDirectory?: string;
+}
+
+export interface ReportOptions {
+  /** Explicit full materialization can use memory proportional to the entire run. */
+  detail?: 'summary' | 'full';
+}
+
 export interface WorkingOrder {
   readonly id: bigint | string;
   readonly side: 'buy' | 'sell';
@@ -55,7 +70,9 @@ export interface ExecutionVenue<Report = Record<string, unknown>> {
   setTarget(target: Decimal, time: Decimal): void;
   /** End at this time (null for an empty source), with no implicit liquidation. */
   finish(time: Decimal | null): void;
-  report(): Report;
+  report(options?: ReportOptions): Report;
+  /** Release incomplete recording if the strategy or source fails. */
+  abort?(): void;
 }
 
 export interface StrategyContext<Data = Record<string, unknown>> {
@@ -98,3 +115,13 @@ export interface ProcessedDataSelection {
   endTime?: Decimal;
   allowGaps?: boolean;
 }
+
+export interface ProcessedInformationSelection extends ProcessedDataSelection {
+  /** Stream admission into a new directory instead of collecting an array. */
+  directory?: string;
+  /** Applies only to in-memory preparation; cannot be combined with directory. */
+  maxRows?: number;
+}
+
+export interface ExactRate { numerator: Decimal; denominator: Decimal; }
+export interface DerivativeWindow { startTime: Decimal; endTime: Decimal; }

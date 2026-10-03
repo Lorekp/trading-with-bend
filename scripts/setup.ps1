@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
+npm ci
+if ($LASTEXITCODE -ne 0) { throw 'Locked dependency installation failed' }
 $taskPin = Get-Content -LiteralPath 'toolchain.json' -Raw | ConvertFrom-Json
 New-Item -ItemType Directory -Force -Path '.tools' | Out-Null
 if (-not (Test-Path -LiteralPath '.tools/bend')) {

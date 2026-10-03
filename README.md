@@ -1,6 +1,6 @@
 # Trading with Bend
 
-A runnable, proof-oriented backtesting reference framework. The **actual accounting, order admission, reservations, cancellation and FIFO matching engine is written in Bend**. Node handles validated JSON input, strategy callbacks, checkpoints, reports and experiment registration around the compiled Bend module. There are no npm dependencies.
+A runnable, proof-oriented backtesting reference framework. The **cash accounting, order admission, reservations, cancellation and FIFO matching engine is written in Bend**. Node handles validated JSON input, strategy callbacks, checkpoints, reports and experiment registration around the compiled Bend module. Archive readers use the locked `tar-stream` and `yauzl` dependencies.
 
 For parallel strategy agents and ML research, start with [the shared research guide](docs/RESEARCH.md) and `AGENTS.md`. The toolkit now includes a durable parallel job queue, programmatic strategies, causal features, ridge/OLS training, purged walk-forward evaluation, persistent final-holdout gates, parameter grids and reusable artifact checks. `src/index.mjs` exports the shared API.
 
@@ -12,11 +12,11 @@ For a small forecasting example, see [the optional ML guide](docs/FORECASTING.md
 research splits and registry, leaves final data unreleased, and requires the
 separate Python dependencies in `requirements-ml.txt`.
 
-The first implementation is deliberately one cash-only spot instrument, integer lots and ordinary limit orders. It implements the starting scope from the supplied specification. It is a reference simulator, not a claim about market realism or profitable strategies.
+Each replay handles one instrument with integer lots and ordinary limit orders. Cash quote/bar venues and a separate derivative venue have explicit accounting and execution assumptions. It is a reference simulator, not a claim about market realism or profitable strategies.
 
 ## Run it
 
-The current workspace is already set up. From the repository root:
+After the setup below, run from the repository root:
 
 ```powershell
 npm run demo
@@ -27,13 +27,15 @@ npm run backtest -- examples/demo.json --out output/my-report.json
 
 `demo` builds, checks the Bend laws, runs the synthetic example and writes a unique file under `output/reports/` (its path is printed). It starts with 100000 EUR cents, buys two lots through partial fills, sells them through partial fills, and finishes at 100260 cents after 40 cents of fees. The example also fills an order while its cancellation request is in transit. Explicit `--out` paths are exclusive: an existing report is never overwritten.
 
-For a fresh Windows checkout, install Node 22+ and Git and provide an existing Ubuntu-24.04 WSL distribution, then run:
+For a fresh Windows checkout, install Node 22.13.0 or newer and Git and provide an existing Ubuntu-24.04 WSL distribution, then run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
 ```
 
-The setup script downloads the pinned Bend revision and a checksum-checked Bun 1.3.10 binary into `.tools`. It does not install global packages or create a WSL distribution. Compilation uses WSL because this Bend revision's import loader assumes POSIX paths; Node runs the emitted JavaScript on Windows. Linux x86-64: run `bash scripts/setup.sh` with Node, Git, curl and unzip installed. On other supported Bend platforms, install Bun and clone the exact revision in `toolchain.json` into `.tools/bend` before `npm run build`. `BEND_BIN` can select an external compiler; reports then explicitly mark its revision as unverified.
+The setup script installs locked npm dependencies with `npm ci`, then downloads the pinned Bend revision and a checksum-checked Bun 1.3.10 binary into `.tools`. It does not install global packages or create a WSL distribution. Compilation uses WSL because this Bend revision's import loader assumes POSIX paths; Node runs the emitted JavaScript on Windows. Linux x86-64: run `bash scripts/setup.sh` with Node, Git, curl and unzip installed. On other supported Bend platforms, run `npm ci`, install Bun and clone the exact revision in `toolchain.json` into `.tools/bend` before `npm run build`. `BEND_BIN` can select an external compiler; reports then explicitly mark its revision as unverified.
+
+The minimum Node version supports built-in `node:sqlite` without an enabling flag; Node 22 still marks that module experimental. See the [Node SQLite documentation](https://nodejs.org/download/release/latest-jod/docs/api/sqlite.html). CI checks the minimum Node version and Node 24, including the Lean proof kernel and both test suites.
 
 To use another installed WSL distribution, set `$env:BEND_WSL_DISTRO = 'Debian'` before setup, build or test commands. The default is `Ubuntu-24.04`.
 
@@ -50,7 +52,7 @@ To use another installed WSL distribution, set `$env:BEND_WSL_DISTRO = 'Debian'`
 - Artifact hashes, separate proof/data/model statuses and persistent experiment records.
 - Research helpers for feature schema/fold binding, label maturity, model availability and evaluation roles.
 
-Read [the model and proof contract](docs/CONTRACT.md) before interpreting results. Margin, shorts, OHLC interpolation, stops, market orders, amendments, rebates, external cash flows and corporate actions are unsupported. Unsupported event types and fields are rejected, not silently approximated. The research layer supports baseline ML training and validation search; its floating-point algorithms have a separate tested boundary.
+Read [the model and proof contract](docs/CONTRACT.md) before interpreting results. Cash venues do not support margin or shorts; the derivative venue implements both under its declared model. OHLC interpolation, stops, market orders, amendments, rebates, external cash flows and corporate actions are unsupported. Unsupported event types and fields are rejected, not silently approximated. The research layer supports baseline ML training and validation search; its floating-point algorithms are tested separately from the Bend laws.
 
 ## Supply data
 
@@ -113,13 +115,22 @@ const simulated = runStrategy(source, venue, ({ history }) =>
 );
 ```
 
-`InformationSource` supplies market/features data. `ExecutionVenue` alone owns orders, fills, fees, funding, liquidity, margin and PnL. Strategies return target positions and receive immutable information history plus venue account state. Either adapter can be replaced independently; see [the adapter interfaces](docs/ADAPTERS.md). The shipped venues use the Bend cash model and explicitly do not implement perpetual funding or margin. Callbacks remain trusted JavaScript. Wrap research runs in `runExperiment`; the CLI does this automatically. Low-level engine calls are not automatically registered.
+`InformationSource` supplies market/features data. `ExecutionVenue` alone owns orders, fills, fees, funding, liquidity, margin and PnL. Strategies return target positions and receive immutable information history plus venue account state. Either adapter can be replaced independently; see [the adapter interfaces](docs/ADAPTERS.md). Quote/bar venues use the Bend cash model; `DerivativeExecutionVenue` adds its separately documented funding and margin model. Callbacks remain trusted JavaScript. Wrap research runs in `runExperiment`; the CLI does this automatically. Low-level engine calls are not automatically registered.
 
 ## Checks and proof boundary
 
 `npm test` builds the engine and runs the E2E-first suite: ZIP ingestion through real strategy fills and immutable reports, separate rule/ML worker processes, optimized/reference replay, checkpoint restoration, malformed-data/tampering rejection, deliberate failing proof mutations and competing experiment processes. Downloaded-data checks run automatically when the September manifest is present. `npm run test:regression` retains the older focused accounting, numerical and policy checks. New behavior should be tested through complete workflows.
 
 Build evidence is bound to hashes of the Bend sources and generated modules; stale builds cannot start a backtest. Provenance is captured for the loaded implementation and remains stable throughout a run. Builds hold an exclusive lock and reject source changes during verification. For large runs, use `runStrategy(source, venue, strategy, { lookback: 64 })` and configure the venue with `{ traceMode: 'compact', orderStorage: 'active' }`. The ETH bridge uses bounded history, compact recording and active storage by default, retaining all fills and final order records.
+
+Profile the same workload in fresh processes to compare memory and disk recording:
+
+```powershell
+npm run benchmark -- --ticks 200000 --orders 1000 --lookback 64 --profile
+npm run benchmark -- --ticks 200000 --orders 1000 --lookback 64 --profile --data-directory output/bench-quotes --audit-directory output/bench-audit
+```
+
+Use fresh directories for each disk run. The benchmark generates its disk input lazily and reports preparation, replay, report/finalization time, process peak RSS and CPU samples. It defaults to a 256-observation lookback, compact trace and active orders; `--lookback all` explicitly measures complete history. Array input and in-memory audit remain available for reference comparisons.
 
 ```powershell
 npm run proof

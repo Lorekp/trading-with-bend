@@ -4,6 +4,9 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DerivativeExecutionVenue, validateDerivativeData, InformationSource, runStrategy, targetPosition, listExperiments, verifyExperimentArtifacts, hash } from '../../src/index.mjs';
+import { loadProcessedDerivativeData } from '../../src/executable-data.mjs';
+import { prepareMarketData } from '../../src/market-data.mjs';
+import { readReplayAudit } from '../../src/recording.mjs';
 
 const instrument = { symbol: 'TEST-PERP', currency: 'USD', lotSize: '1', priceTick: '1' };
 function config(payoff = 'linear', overrides = {}) {
@@ -22,7 +25,132 @@ function replay(configuration, dataset, signals) {
   const source = new InformationSource({ id: 'signals', instrument, observations: signals.map(([time, target]) => ({ time: String(time), availableAt: String(time), data: { target } })) });
   return runStrategy(source, venue, ({ observation }) => observation.target).report();
 }
-const base = [['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100], ['mark', 2, 110], ['quote', 2, 110], ['quote', 3, 110], ['funding', 5, 110, { ratePpm: '10000' }], ['mark', 6, 110], ['quote', 6, 110], ['quote', 7, 110]];
+const base = [['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100], ['mark', 2, 110], ['quote', 2, 110], ['quote', 3, 110], ['funding', 5, 110, { rate: { numerator: '1', denominator: '100' } }], ['mark', 6, 110], ['quote', 6, 110], ['quote', 7, 110]];
+
+test('funding preserves sub-ppm fractions and rounds only the final settlement transfer', () => {
+  for (const numerator of ['23', '-23']) for (const target of ['100', '-100']) {
+    const c = config('linear', { initialCash: '1000000000' });
+    const dataset = data([['mark', 0, 1000000], ['quote', 0, 1000000], ['quote', 1, 1000000],
+      ['funding', 5, 1000000, { rate: { numerator, denominator: '25000000' } }]]);
+    const report = replay(c, dataset, [[0, target], [5, null]]);
+    assert.equal(report.performance.funding, String(-BigInt(target) / 100n * BigInt(numerator) * 4n));
+  }
+  for (const rate of [{ numerator: '1', denominator: '0' }, { numerator: '-0', denominator: '1' }, { numerator: '2', denominator: '1' }]) {
+    assert.throws(() => validateDerivativeData(data([['funding', 5, 100, { rate }]]), config()), { code: 'DERIVATIVE_FUNDING' });
+  }
+  const c = config(); c.contract.fundingTimestampToleranceMs = '2';
+  const delayed = data([['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100], ['funding', 6, 100, { rate: { numerator: '1', denominator: '100' } }]]);
+  const report = replay(c, delayed, [[0, '2'], [5, null], [6, null]]);
+  assert.equal(report.postings.find(posting => posting.type === 'funding').time, '6', 'Timestamp tolerance must not move funding earlier');
+  assert.throws(() => validateDerivativeData(delayed, config()), { code: 'DERIVATIVE_FUNDING' });
+  const duplicate = structuredClone(delayed.events.at(-1)); duplicate.id = 'duplicate-slot'; duplicate.sequence = '5'; duplicate.time = duplicate.sourceTime = '7';
+  assert.throws(() => validateDerivativeData({ ...delayed, endTime: '7', events: [...delayed.events, duplicate] }, c), { code: 'DERIVATIVE_FUNDING' });
+});
+
+test('admitted immutable datasets are reusable and windows seed market state without replaying the prefix', () => {
+  const c = config(), input = data(base), admitted = validateDerivativeData(input, c);
+  assert.equal(validateDerivativeData(admitted, { ...c, initialCash: '20000' }), admitted);
+  input.events[0].price = '999';
+  assert.equal(admitted.events[0].price, '100');
+  assert.throws(() => { admitted.events[0].price = '999'; }, TypeError);
+  assert.throws(() => validateDerivativeData(admitted, { ...c, contract: { ...c.contract, fundingOffsetMs: '6' } }), { code: 'UNIT_MISMATCH' });
+  const prefix = new DerivativeExecutionVenue({ id: 'prefix', config: c, data: admitted });
+  const window = new DerivativeExecutionVenue({ id: 'window', config: c, data: admitted, window: { startTime: '4', endTime: '7' } });
+  for (const venue of [prefix, window]) {
+    venue.advanceTo('4'); venue.setTarget('2', '4'); venue.advanceTo('7'); venue.finish('7');
+  }
+  const whole = prefix.report(), selected = window.report();
+  assert.deepEqual(selected.terminal, whole.terminal);
+  assert.deepEqual(selected.fills, whole.fills);
+  assert.deepEqual(selected.postings, whole.postings);
+  assert.deepEqual(selected.valuations, whole.valuations.filter(row => BigInt(row.time) >= 4n));
+  assert.ok(selected.valuations.every(row => BigInt(row.time) >= 4n));
+  assert.equal(selected.manifest.datasetHash, whole.manifest.datasetHash);
+  const invalid = new DerivativeExecutionVenue({ id: 'clip', config: c, data: admitted, window: { startTime: '4', endTime: '6' } });
+  assert.throws(() => invalid.advanceTo('7'), { code: 'DATA_COVERAGE' });
+  const expiry = { ...c, contract: { kind: 'future', payoff: 'linear', contractValue: '1', settlementScale: '1', expiryTime: '3' } };
+  const settled = new DerivativeExecutionVenue({ id: 'settled', config: expiry, data: data([['mark', 0, 100], ['quote', 0, 100], ['settlement', 3, 125]], 7), window: { startTime: '4', endTime: '7' } });
+  settled.advanceTo('4'); settled.setTarget('1', '4'); settled.finish('4');
+  assert.equal(settled.report().terminal.settled, true);
+  assert.equal(settled.report().orders[0].status, 'rejected-expired');
+});
+
+test('processed derivative bridge verifies shards, normalizes units and makes liquidity assumptions explicit', async () => {
+  const parent = resolve('output'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'e2e-executable-'));
+  try {
+    const rawDirectory = join(root, 'raw'); mkdirSync(rawDirectory);
+    const canonical = { symbol: 'ETH/USDT', currency: 'USDT-micro', lotSize: '0.001', priceTick: '10' };
+    const c = config('linear', { instrument: canonical, initialCash: '1000000000' });
+    const observation = (time, row) => ({ time: String(time), availableAt: String(time), data: row });
+    const series = {
+      markPrice: [observation(0, { close: '100000000001' }), observation(6, { close: '110000000000' })],
+      funding: [observation(5, { rate: { numerator: '23', denominator: '25000000' } })],
+      bookTicker: [0, 1, 6].map(time => observation(time, { eventId: String(time), bid: '1000000', ask: '1000000', bidSizeLots: '1000', askSizeLots: '1000' })),
+      bars: [0, 1, 6].map(time => observation(time, { close: '1000000', volumeLots: '1000' })),
+    };
+    for (const [kind, records] of Object.entries(series)) {
+      const manifest = { venue: 'okx', kind, rawDirectory, instrument: canonical, sourceMarket: 'linear USDT perpetual',
+        window: { startTime: '0', endTime: '7' }, expectedStepMs: null };
+      await prepareMarketData({ source: { manifest, async *records() { yield* records; } }, outputDirectory: join(root, kind) });
+    }
+    const options = { config: c, quoteManifestPath: join(root, 'bookTicker', 'manifest.json'), markManifestPath: join(root, 'markPrice', 'manifest.json'),
+      fundingManifestPath: join(root, 'funding', 'manifest.json'), startTime: '0', endTime: '6', markRounding: 'floor', liquidity: { model: 'displayed-size', participationBps: '1000' } };
+    await assert.rejects(loadProcessedDerivativeData({ ...options, markRounding: 'exact' }), { code: 'DATA_PRECISION' });
+    const loaded = await loadProcessedDerivativeData(options);
+    assert.equal(loaded.data.events.find(event => event.type === 'quote').askLots, '100');
+    assert.equal(loaded.data.events[0].price, '1000000');
+    assert.deepEqual(loaded.data.events.find(event => event.type === 'funding').rate, { numerator: '23', denominator: '25000000' });
+    const venue = new DerivativeExecutionVenue({ id: loaded.identity, config: c, data: loaded.data });
+    venue.advanceTo('0'); venue.setTarget('100', '0'); venue.advanceTo('6'); venue.finish('6');
+    assert.equal(venue.report().performance.funding, '-92');
+    assert.ok(loaded.provenance.assumptions.some(value => value.includes('Queue position')));
+    const proxy = await loadProcessedDerivativeData({ ...options, quoteManifestPath: join(root, 'bars', 'manifest.json'), liquidity: { model: 'bar-volume', participationBps: '100', halfSpreadTicks: '2' } });
+    const quote = proxy.data.events.find(event => event.type === 'quote');
+    assert.deepEqual([quote.bid, quote.ask, quote.askLots], ['999980', '1000020', '10']);
+    await assert.rejects(loadProcessedDerivativeData({ ...options, maxEvents: 2 }), { code: 'DATA_SIZE' });
+    await assert.rejects(loadProcessedDerivativeData({ ...options, startTime: '5' }), { code: 'STALE_MARK' });
+    await assert.rejects(loadProcessedDerivativeData({ ...options, config: { ...c, contract: { ...c.contract, fundingOffsetMs: '4' } } }), { code: 'DERIVATIVE_FUNDING' });
+  } finally { assert.equal(dirname(root), parent); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('disk derivative audit exactly matches memory through partial fills, cancellation, funding and report hydration', () => {
+  const parent = resolve('output'); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'e2e-derivative-audit-'));
+  try {
+    const rows = [['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100, { askLots: '1' }],
+      ['quote', 2, 100, { askLots: '1' }], ['quote', 3, 100], ['mark', 4, 110], ['quote', 4, 110],
+      ['funding', 5, 110, { rate: { numerator: '23', denominator: '25000000' } }], ['quote', 6, 110], ['quote', 7, 110]];
+    for (const payoff of ['linear', 'inverse']) {
+      const c = config(payoff, { cancelLatencyMs: '2' }), admitted = validateDerivativeData(data(rows), c);
+      const venues = [undefined, join(root, payoff)].map(auditDirectory => new DerivativeExecutionVenue({ id: 'equivalent', config: c, data: admitted, ...(auditDirectory ? { auditDirectory } : {}) }));
+      for (const venue of venues) {
+        for (const [time, target] of [['0', '5'], ['1', '0'], ['3', '2'], ['5', '0'], ['7', null]]) {
+          venue.advanceTo(time); if (target !== null) venue.setTarget(target, time);
+        }
+        venue.finish('7');
+      }
+      const [memory, disk] = venues, expected = memory.report(), summary = disk.report();
+      assert.equal(summary.fills, undefined); assert.equal(summary.orders, undefined);
+      assert.equal(summary.traceHash, expected.traceHash);
+      assert.deepEqual(summary.performance, expected.performance);
+      assert.ok(expected.orders.some(record => record.status === 'cancelled'));
+      assert.ok(expected.postings.some(posting => posting.type === 'funding'));
+      assert.equal(expected.fills[0].quantity, '1');
+      for (const kind of ['fills', 'orders', 'postings', 'valuations']) {
+        assert.equal(summary.audit.streams[kind].count, expected[kind].length);
+        const records = JSON.parse(JSON.stringify([...readReplayAudit(summary.audit, kind)], (_, value) => typeof value === 'bigint' ? String(value) : value));
+        assert.deepEqual(records, expected[kind]);
+      }
+      const { audit, ...hydrated } = disk.report({ detail: 'full' });
+      assert.deepEqual(hydrated, expected);
+      hydrated.fills[0].price = '999999'; hydrated.orders.length = 0;
+      const { audit: repeatedAudit, ...repeated } = disk.report({ detail: 'full' });
+      assert.deepEqual(repeated, expected, 'Mutating a returned report must not change the sealed audit');
+      assert.equal(repeatedAudit.checksum, audit.checksum);
+    }
+  } finally { assert.equal(dirname(root), parent); rmSync(root, { recursive: true, force: true }); }
+});
 
 for (const payoff of ['linear', 'inverse']) {
   test(`${payoff}: independent information drives partial closes, reversal, funding and exact P&L`, () => {
@@ -40,7 +168,7 @@ for (const payoff of ['linear', 'inverse']) {
 
   test(`${payoff}: short funding receipts and negative rates reverse direction`, () => {
     for (const target of ['2', '-2']) for (const rate of ['10000', '-10000']) {
-      const dataset = data([['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100], ['funding', 5, 100, { ratePpm: rate }]]);
+      const dataset = data([['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100], ['funding', 5, 100, { rate: { numerator: rate, denominator: '1000000' } }]]);
       const report = replay(config(payoff), dataset, [[0, target], [5, null]]);
       const amount = payoff === 'linear' ? 2n : 200n;
       assert.equal(BigInt(report.performance.funding), -BigInt(target) / 2n * (BigInt(rate) / 10000n) * amount);
@@ -92,7 +220,7 @@ test('mark-based liquidation preserves negative collateral, charges fees and hal
 });
 
 test('funding can cause liquidation and applies once even with idempotent redelivery', () => {
-  const dataset = data([['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100], ['funding', 5, 100, { ratePpm: '60000' }]]);
+  const dataset = data([['mark', 0, 100], ['quote', 0, 100], ['quote', 1, 100], ['funding', 5, 100, { rate: { numerator: '3', denominator: '50' } }]]);
   dataset.events.push(structuredClone(dataset.events.at(-1)));
   const report = replay(config('linear', { initialCash: '100' }), dataset, [[0, '10'], [5, null]]);
   assert.equal(report.performance.funding, '-60');
@@ -194,7 +322,8 @@ test('real derivative studies queue all baselines, preserve fold artifacts and c
       assert.ifError(run.error); assert.equal(run.status, 0, run.stderr + run.stdout);
       const result = JSON.parse(run.stdout);
       assert.equal(result.trials.length, 3);
-      assert.ok(result.trials.every(trial => trial.status === 'completed' && trial.result.folds.length === 2));
+      assert.ok(result.trials.every(trial => trial.status === 'completed' && trial.result.study.folds.length === 2));
+      assert.equal(result.selection.population.length, 3);
       assert.equal(result.final.status, 'valid-under-declared-model');
       const records = listExperiments(registry);
       assert.equal(records.length, 4);

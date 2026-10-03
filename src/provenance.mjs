@@ -10,7 +10,7 @@ function toolkitFiles(directory = 'src') {
 }
 
 export function sourceManifest() {
-  const paths = ['LAWS.bend', 'PROOF.bend', 'scripts/build.mjs', 'build/engine.mjs', 'build/policy.mjs', 'build/archive.mjs', 'toolchain.json', 'package.json',
+  const paths = ['LAWS.bend', 'PROOF.bend', 'scripts/build.mjs', 'build/engine.mjs', 'build/policy.mjs', 'build/archive.mjs', 'toolchain.json', 'package.json', 'package-lock.json',
     ...toolkitFiles(),
     ...readdirSync(new URL('../bend/', import.meta.url)).filter(name => name.endsWith('.bend')).map(name => `bend/${name}`)].sort();
   return Object.fromEntries(paths.map(path => [path, hash(readFileSync(new URL(`../${path}`, import.meta.url), 'utf8'))]));
@@ -20,9 +20,9 @@ export function sourceManifest() {
 // Reports and experiments retain the full toolkit identity above. Research/CLI
 // changes require a fresh process, but do not change replay compatibility.
 export function checkpointSources(sources) {
-  const host = ['src/core.mjs', 'src/framework.mjs', 'src/bend-runtime.mjs', 'src/provenance.mjs'];
+  const host = ['src/core.mjs', 'src/framework.mjs', 'src/recording.mjs', 'src/bend-runtime.mjs', 'src/provenance.mjs'];
   return Object.fromEntries(Object.entries(sources).filter(([path]) =>
-    host.includes(path) || !path.startsWith('src/') && path !== 'package.json'));
+    host.includes(path) || !path.startsWith('src/') && !['package.json', 'package-lock.json'].includes(path)));
 }
 
 // Pin evidence when toolkit modules load. Readers may inspect a registry without
@@ -41,7 +41,7 @@ export function verifiedRuntimeProvenance() {
   const sources = runtimeProvenance(), current = sourceManifest();
   requireThat(canonical(current) === canonical(sources), 'STALE_RUNTIME', 'Toolkit changed after module loading; restart the process');
   const verification = JSON.parse(readFileSync(new URL('../build/verification.json', import.meta.url), 'utf8'));
-  const checkedPaths = Object.keys(sources).filter(path => !path.startsWith('src/') && path !== 'package.json').sort();
+  const checkedPaths = Object.keys(sources).filter(path => !path.startsWith('src/') && !['package.json', 'package-lock.json'].includes(path)).sort();
   requireThat(verification.compiler === 'passed' && verification.sourceHashes &&
     canonical(Object.keys(verification.sourceHashes).sort()) === canonical(checkedPaths) &&
     checkedPaths.every(path => verification.sourceHashes[path] === sources[path]),

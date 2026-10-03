@@ -1,4 +1,4 @@
-import { hash, integer, requireThat, freeze as freezeData } from './core.mjs';
+import { CanonicalArrayHash, immutableCopy, integer, requireThat, freeze as freezeData } from './core.mjs';
 import { validateInstrument, validateObservation } from './information-source.mjs';
 
 const usedVenues = new WeakSet();
@@ -32,17 +32,17 @@ export function runStrategy(informationSource, executionVenue, strategy, options
   requireThat(!usedVenues.has(executionVenue), 'VENUE_REUSED', 'Use a fresh ExecutionVenue for each replay');
   usedVenues.add(executionVenue);
   const provenance = freezeData(structuredClone({ informationSource: informationSource.manifest, executionVenue: executionVenue.manifest }));
-  const history = [], targets = [];
+  const history = [], targets = new CanonicalArrayHash();
   let previous = null, count = 0, firstObservation = null;
-  for (const observation of informationSource.observations()) {
+  try { for (const observation of informationSource.observations()) {
     previous = validateObservation(observation, previous);
     const time = observation.availableAt;
     executionVenue.advanceTo(time);
-    const data = freezeData(structuredClone(observation.data));
+    const data = immutableCopy(observation.data);
     firstObservation ??= data;
     history.push(data); count++;
     if (lookback !== 'all' && history.length > lookback) history.shift();
-    const account = freezeData(structuredClone(executionVenue.snapshot()));
+    const account = immutableCopy(executionVenue.snapshot());
     const context = Object.freeze({ observation: data, history: Object.freeze(history.slice()),
       time, index: count - 1, tickCount: count, account, ledger: account.ledger, orders: account.orders, equity: account.equity });
     const target = strategy(context);
@@ -50,9 +50,11 @@ export function runStrategy(informationSource, executionVenue, strategy, options
     if (target !== null) { integer(target, 'strategy target'); executionVenue.setTarget(target, time); }
     targets.push({ time, target });
   }
+  executionVenue.finish(previous === null ? null : String(previous));
+  } catch(error) { executionVenue.abort?.(); throw error; }
   const endTime = previous === null ? null : String(previous);
-  executionVenue.finish(endTime);
-  return Object.freeze({ observationCount: count, firstObservation, endTime, targetsHash: hash(targets), report() {
-    return { ...executionVenue.report(), routing: provenance, signals: { count, targetsHash: hash(targets) } };
+  const targetsHash = targets.digest();
+  return Object.freeze({ observationCount: count, firstObservation, endTime, targetsHash, report(options) {
+    return { ...executionVenue.report(options), routing: provenance, signals: { count, targetsHash } };
   } });
 }

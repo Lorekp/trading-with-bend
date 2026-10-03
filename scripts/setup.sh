@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+npm ci
 revision=$(node -p "JSON.parse(require('fs').readFileSync('toolchain.json')).bendRevision")
 bun_version=$(node -p "JSON.parse(require('fs').readFileSync('toolchain.json')).bunVersion")
 bun_hash=$(node -p "JSON.parse(require('fs').readFileSync('toolchain.json')).bunLinuxX64ZipSha256")

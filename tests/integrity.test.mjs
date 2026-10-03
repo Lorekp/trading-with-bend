@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const demo = JSON.parse(readFileSync(join(root, 'examples/demo.json'), 'utf8'));
 const projectFiles = [
-  'scripts/build.mjs', 'toolchain.json', 'package.json', 'LAWS.bend', 'PROOF.bend',
+  'scripts/build.mjs', 'toolchain.json', 'package.json', 'package-lock.json', 'LAWS.bend', 'PROOF.bend',
   'build/engine.mjs', 'build/policy.mjs', 'build/archive.mjs', 'build/verification.json',
 ];
 
@@ -130,11 +130,11 @@ test('checkpoints survive research and CLI edits in a fresh runtime but reject r
   const run = new Backtest(demo.config).run(demo.events.slice(0, 3));
   const checkpoint = run.checkpoint();
   const expected = run.run(demo.events.slice(3)).report();
-  for (const file of ['src/cli.mjs', 'src/ml/forecast.py', 'src/framework.mjs', 'src/core.mjs']) {
+  for (const file of ['src/cli.mjs', 'src/ml/forecast.py', 'package-lock.json', 'src/framework.mjs', 'src/core.mjs', 'src/recording.mjs']) {
     const directory = copyProject(t);
     appendFileSync(join(directory, file), '\n');
     const { Backtest: Reloaded } = await load(directory, 'src/framework.mjs');
-    if (file === 'src/framework.mjs' || file === 'src/core.mjs') {
+    if (['src/framework.mjs', 'src/core.mjs', 'src/recording.mjs'].includes(file)) {
       assert.throws(() => Reloaded.resume(checkpoint), hasCode('CHECKPOINT_VERSION'));
     } else {
       const actual = Reloaded.resume(checkpoint).run(demo.events.slice(3)).report();
@@ -146,12 +146,12 @@ test('checkpoints survive research and CLI edits in a fresh runtime but reject r
   }
 });
 
-test('toolkit provenance automatically pins nested Python implementation changes', async t => {
+for (const changed of ['src/ml/forecast.py', 'package-lock.json']) test(`toolkit provenance pins ${changed} changes before experiment admission`, async t => {
   const directory = copyProject(t);
   const { runtimeProvenance } = await load(directory, 'src/provenance.mjs');
   const { enqueueExperiment, listExperiments } = await load(directory, 'src/experiments.mjs');
-  assert.match(runtimeProvenance()['src/ml/forecast.py'], /^[a-f0-9]{64}$/);
-  appendFileSync(join(directory, 'src/ml/forecast.py'), '\n');
+  assert.match(runtimeProvenance()[changed], /^[a-f0-9]{64}$/);
+  appendFileSync(join(directory, changed), '\n');
   const worker = join(directory, 'worker.mjs'), registry = join(directory, 'registry');
   writeFileSync(worker, 'export default () => ({});');
   assert.throws(() => enqueueExperiment(registry, { key: 'changed-backend', configuration: {}, workerModule: worker }), hasCode('STALE_RUNTIME'));
