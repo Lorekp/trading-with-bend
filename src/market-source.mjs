@@ -10,6 +10,27 @@ const MINUTE = 60000n;
 const TYPES = { bars: 'candles1m', bookTicker: 'l2Book400', trades: 'trades', markPrice: 'markPrice1m', indexPrice: 'indexPrice1m', premium: 'premiumHistory', funding: 'fundingRate' };
 const BINANCE = { bars: 'klines', markPrice: 'markPriceKlines', indexPrice: 'indexPriceKlines', premium: 'premiumIndexKlines', funding: 'fundingRate' };
 const strings = row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, typeof value === 'bigint' ? String(value) : value]));
+
+function fundingContract(venue, kind, input) {
+  if (kind !== 'funding') {
+    requireThat(input === undefined, 'FUNDING_CONTRACT', 'Funding semantics apply only to funding sources');
+    return null;
+  }
+  requireThat(input && Object.keys(input).every(key => ['source', 'rateRole', 'publicationTime'].includes(key)),
+    'FUNDING_CONTRACT', 'Declare funding source, rateRole and publicationTime');
+  const { source, rateRole, publicationTime } = input;
+  requireThat((venue === 'binance' ? ['binance-archive'] : ['okx-archive', 'okx-history', 'okx-current']).includes(source)
+    && ['archive', 'predicted', 'realized'].includes(rateRole), 'FUNDING_CONTRACT', 'Unsupported funding source or rate role');
+  requireThat(source === 'okx-current' ? rateRole === 'predicted' : rateRole !== 'predicted',
+    'FUNDING_CONTRACT', 'Predictions require the current-rate contract');
+  requireThat(['ts', 'settlement-assumption'].includes(publicationTime)
+    && (source !== 'binance-archive' || publicationTime === 'settlement-assumption')
+    && (rateRole !== 'predicted' || publicationTime === 'ts'),
+  'FUNDING_CONTRACT', 'Declare an observed publication timestamp or an explicit settlement-time assumption');
+  return freeze({ source, rateRole, publicationTime,
+    rateField: source === 'binance-archive' ? 'last_funding_rate' : source === 'okx-history' && rateRole === 'realized' ? 'realizedRate' : 'fundingRate',
+    settlementTimeField: source === 'binance-archive' ? 'calc_time' : 'fundingTime' });
+}
 const price = value => {
   const result = scaledDecimal(value, 1000n, 'price');
   requireThat(result > 0n && result % 10n === 0n, 'PRICE_TICK', 'ETH trade price must be a positive cent tick');
@@ -23,8 +44,9 @@ function bar(values, time) {
 }
 
 /** Open a data-only adapter. All exchange-specific schemas stay behind this seam. */
-export async function openMarketSource({ venue, kind, manifestPath, startTime, endTime, publicationDelayMs = '0', contractSizeETH } = {}) {
+export async function openMarketSource({ venue, kind, manifestPath, startTime, endTime, publicationDelayMs = '0', contractSizeETH, funding } = {}) {
   requireThat(['binance', 'okx'].includes(venue) && Object.hasOwn(TYPES, kind), 'DATA_SOURCE', 'Select a supported venue and dataset kind');
+  const fundingSemantics = fundingContract(venue, kind, funding);
   const text = await readFile(manifestPath, 'utf8'), raw = JSON.parse(text), directory = dirname(resolve(manifestPath));
   const start = nat(startTime, 'startTime'), end = nat(endTime, 'endTime'), delay = nat(publicationDelayMs, 'publicationDelayMs');
   requireThat(start < end, 'DATA_RANGE', 'Require a nonempty UTC selection');
@@ -34,7 +56,7 @@ export async function openMarketSource({ venue, kind, manifestPath, startTime, e
     'DATA_MANIFEST', 'Expected the declared ETH perpetual raw manifest');
   const dataset = raw.datasets?.find(d => d.type === nativeType);
   requireThat(dataset && ['complete', 'partial'].includes(dataset.status) && dataset.files?.length > 0, 'DATA_MANIFEST', 'Dataset must have verified raw files and explicit coverage');
-  const files = dataset.files.filter(f => f.firstTime === undefined || f.lastTime === undefined || (BigInt(f.firstTime) < end && BigInt(f.lastTime) >= start));
+  const files = dataset.files.filter(f => fundingSemantics?.publicationTime === 'ts' || f.firstTime === undefined || f.lastTime === undefined || (BigInt(f.firstTime) < end && BigInt(f.lastTime) >= start));
   requireThat(files.length > 0, 'DATA_RANGE', 'No raw files overlap the selection');
   const multiplier = contractSizeETH === undefined ? null : exactDecimal(contractSizeETH, 'contractSizeETH');
   if (venue === 'okx' && ['bookTicker', 'trades'].includes(kind)) requireThat(multiplier?.numerator > 0n, 'CONTRACT_UNITS', 'Pin contractSizeETH explicitly; current metadata is not a historical rule schedule');
@@ -45,6 +67,7 @@ export async function openMarketSource({ venue, kind, manifestPath, startTime, e
   };
   const manifest = {
     venue, kind, nativeType, nativeSymbol: raw.symbol, sourceMarket: 'linear USDT perpetual',
+    ...(fundingSemantics ? { funding: fundingSemantics } : {}),
     instrument: { symbol: 'ETH/USDT', currency: 'USDT-micro', lotSize: '0.001', priceTick: '10' },
     units: { price: ['markPrice', 'indexPrice'].includes(kind) ? 'USDT per ETH multiplied by 100000000' : 'microUSDT per 0.001 ETH lot', sizeLots: 'whole 0.001 ETH lots', contractSizeETH: contractSizeETH ?? null,
       rates: 'exact signed numerator/denominator; never rounded to a price' },
@@ -55,9 +78,19 @@ export async function openMarketSource({ venue, kind, manifestPath, startTime, e
     limitations: ['Exchange publication timestamps are used with an explicit assumed delay; local receipt times are unavailable.',
       'Displayed book size is market data, not replenished fill liquidity; only ExecutionVenue may model fills, fees, funding, margin and PnL.',
       ...(multiplier ? ['Contract size is an explicitly pinned assumption, not verified historical metadata.'] : []),
+      ...(fundingSemantics ? ['Funding roles are caller declarations, not proof of vendor field meaning; archive rates cannot supply settlement postings.',
+        ...(fundingSemantics.publicationTime === 'settlement-assumption' ? ['Funding publication at settlement is an explicit assumption, not an observed publication timestamp.'] : [])] : []),
       ...(kind === 'bookTicker' ? ['Every selected L2 update is replayed; no sequence IDs are available to prove lossless capture.'] : [])],
   };
   const observation = (time, available, data) => ({ time: String(time), availableAt: String(checked(available + delay, 'publication time')), data: strings(data) });
+  const fundingObservation = (settlementTime, publishedAt, rate) => {
+    requireThat(fundingSemantics.rateRole !== 'predicted' || publishedAt < settlementTime,
+      'FUNDING_TIMING', 'A prediction must be published before its settlement');
+    requireThat(fundingSemantics.rateRole !== 'realized' || publishedAt >= settlementTime,
+      'FUNDING_TIMING', 'A realized rate cannot be published before settlement');
+    return observation(publishedAt, publishedAt, { eventId: `${settlementTime}:${publishedAt}`, rate,
+      rateRole: fundingSemantics.rateRole, settlementTime, publishedAt });
+  };
 
   async function* records() {
     if (venue === 'binance') {
@@ -69,7 +102,11 @@ export async function openMarketSource({ venue, kind, manifestPath, startTime, e
         const result = await loadBinanceSeries({ ...options, type: nativeType });
         for (const row of result.rows) {
           const time = BigInt(row.time ?? row.closeTime);
-          const data = ['funding', 'premium'].includes(kind)
+          if (kind === 'funding') {
+            yield fundingObservation(time, time, rationalStrings({ numerator: BigInt(row.rate), denominator: 100000000n }));
+            continue;
+          }
+          const data = kind === 'premium'
             ? { eventId: String(time), rate: rationalStrings({ numerator: BigInt(row.rate ?? row.close), denominator: 100000000n }) }
             : row;
           yield observation(time, BigInt(row.availableAt), data);
@@ -140,11 +177,20 @@ export async function openMarketSource({ venue, kind, manifestPath, startTime, e
       const rows = JSON.parse(await readFile(verified.path, 'utf8'));
       let previous = null;
       for (const row of rows) {
-        const rate = kind === 'funding' || kind === 'premium', time = nat(rate ? row.fundingTime ?? row.ts : row[0], 'timestamp');
+        if (kind === 'funding') {
+          requireThat(row.instId === 'ETH-USDT-SWAP', 'DATA_SYMBOL', 'Wrong API instrument');
+          const settlement = nat(row.fundingTime, 'funding settlement time');
+          const published = fundingSemantics.publicationTime === 'ts' ? nat(row.ts, 'funding publication time') : settlement;
+          requireThat(previous === null || published >= previous, 'DATA_ORDER', 'Funding publication timestamps regress'); previous = published;
+          const record = fundingObservation(settlement, published, rationalStrings(exactDecimal(row[fundingSemantics.rateField], 'funding rate', { signed: true })));
+          if (published >= start && published < end) yield record;
+          continue;
+        }
+        const rate = kind === 'premium', time = nat(rate ? row.ts : row[0], 'timestamp');
         requireThat(previous === null || time >= previous, 'DATA_ORDER', 'API timestamps regress'); previous = time;
         if (rate) {
           requireThat(row.instId === 'ETH-USDT-SWAP', 'DATA_SYMBOL', 'Wrong API instrument');
-          const value = exactDecimal(kind === 'funding' ? row.fundingRate : row.premium, 'rate', { signed: true });
+          const value = exactDecimal(row.premium, 'rate', { signed: true });
           if (time >= start && time < end) yield observation(time, time, { eventId: String(time), rate: rationalStrings(value) });
         } else {
           requireThat(row.at(-1) === '1' && time % MINUTE === 0n, 'BAR_INCOMPLETE', 'Require confirmed aligned price bars');

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hash } from '../src/core.mjs';
 import { RollingFeatures, featureSchema, computeFeatures, validateFeatureArtifact } from '../src/features.mjs';
-import { fitStandardScaler, transformFeatures, fitRidge, validateRidgeModel, predictRidge, evaluateRegression } from '../src/models.mjs';
+import { fitStandardScaler, transformFeatures, fitRidge, validateRidgeModel, createRidgePredictor, predictRidge, evaluateRegression } from '../src/models.mjs';
 import { stableMean, populationMoments, rootMeanSquare } from '../src/numerics.mjs';
 import { trainingWindow, evaluationWindow } from '../src/evaluation.mjs';
 
@@ -116,6 +116,28 @@ test('ridge has analytic coefficient shrinkage with an unpenalized intercept', (
   const model = fit({ alpha: 3 });
   near(model.intercept, 5); near(model.coefficients[0], Math.sqrt(2 / 3));
   near(predictRidge({ model, feature: feature(7, 4), schema, fold: 'fold-1', decisionTime: '7' }).prediction, 7);
+});
+
+test('admitted ridge predictors own immutable state and retain per-call feature and timing gates', () => {
+  const model = structuredClone(fit()), definitions = structuredClone(schema);
+  const args = { feature: feature(7, 4), decisionTime: '7' };
+  const expected = predictRidge({ model, schema, fold: 'fold-1', ...args });
+  const predict = createRidgePredictor({ model, schema: definitions, fold: 'fold-1' });
+  model.coefficients[0] = 999; model.preprocessing.means[0] = -999; definitions[0].unit = 'wrong';
+  Object.defineProperty(model, 'trainingRowIds', { get() { assert.fail('Inference must not read caller lineage'); } });
+  assert.deepEqual(predict(args), expected);
+  assert.deepEqual(predict(args), expected);
+  assert.throws(() => predict({ ...args, decisionTime: '5' }), code('MODEL_NOT_AVAILABLE'));
+  assert.throws(() => predict({ ...args, feature: feature(7, 4, 8) }), code('FEATURE_AVAILABILITY'));
+  const tampered = structuredClone(args.feature); tampered.values[0] = 123;
+  assert.throws(() => predict({ ...args, feature: tampered }), code('FEATURE_ARTIFACT'));
+  const wrongSchema = computeFeatures([observation(7, 4)], [{ ...schema[0], unit: 'other' }])[0];
+  assert.throws(() => predict({ ...args, feature: wrongSchema }), code('FEATURE_SCHEMA'));
+  assert.throws(() => createRidgePredictor({ model: fit(), schema, fold: 'wrong' }), code('FOLD_MISMATCH'));
+  const malformed = structuredClone(fit()); malformed.trainingRowIds[1] = malformed.trainingRowIds[0];
+  assert.throws(() => createRidgePredictor({ model: rehash(malformed), schema, fold: 'fold-1' }), code('MODEL_ARTIFACT'));
+  malformed.preprocessing.means[0]++;
+  assert.throws(() => createRidgePredictor({ model: malformed, schema, fold: 'fold-1' }), code('MODEL_ARTIFACT'));
 });
 
 test('multivariate OLS recovers independent known coefficients and held-out combinations', () => {

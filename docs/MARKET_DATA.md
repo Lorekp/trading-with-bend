@@ -17,7 +17,7 @@ InformationSource interface. Models and strategies need no vendor parsers.
 | `bars` | Existing verified minute-bar loader | Confirmed candle ZIPs | Existing eight-field bar schema |
 | `markPrice`, `indexPrice` | Verified auxiliary ZIPs | Verified API JSON | Completed price OHLC, scale 1e8 USDT/ETH |
 | `premium` | Close of completed premium-index bar | Native premium observation | Exact signed rational rate |
-| `funding` | Funding archive | Funding settlements | Exact signed rational rate |
+| `funding` | Explicit archive/realized role | Explicit archive, current prediction or realized history contract | Exact signed rational rate, role and separate publication/settlement times |
 | `trades` | Not yet adapted | Trade ZIPs | Native ID, side, exact price and size |
 | `bookTicker` | Not available in this local archive | Replayed 400-level L2 | Best bid/ask and displayed sizes per event |
 
@@ -39,6 +39,51 @@ The source manifest retains the native dataset type and venue. Candle closes
 become available after the inclusive close timestamp; other observations use
 their native timestamp. `publicationDelayMs` adds an explicit assumed delay.
 Zero delay is an assumption: the archives do not supply local receipt times.
+
+### Funding contracts
+
+Funding sources require `funding: { source, rateRole, publicationTime }`; no
+meaning is inferred from the presence of a `fundingRate` field. Supported
+contracts select these fields:
+
+| Source | Rate role | Native rate field |
+| --- | --- | --- |
+| `binance-archive` | `archive` or explicitly qualified `realized` | `last_funding_rate` |
+| `okx-archive` | `archive` or explicitly qualified `realized` | `fundingRate` |
+| `okx-history` | `archive` | `fundingRate` |
+| `okx-history` | `realized` | `realizedRate` |
+| `okx-current` | `predicted` | `fundingRate` |
+
+These are declarations about the selected source, not certificates of vendor
+correctness. Retain the evidence for qualifying an archive field as realized
+in the study's dependencies. Existing archive values have not been shown wrong;
+`archive` preserves them without asserting prediction or settlement semantics.
+The history field distinction follows the [OKX funding history contract](https://www.okx.com/docs-v5/en/#public-data-rest-api-get-funding-rate-history).
+Missing selected fields fail; there is no fallback between rate fields.
+
+`publicationTime: 'ts'` uses the OKX record's publication timestamp.
+`publicationTime: 'settlement-assumption'` explicitly assumes publication at
+`fundingTime` (OKX) or `calc_time` (Binance); Binance requires this assumption.
+Current predictions require `ts` strictly before settlement. Realized rates
+cannot be published before settlement. `publicationDelayMs` is added afterward.
+Records retain `data.publishedAt`, `data.settlementTime`, `data.rateRole` and the
+exact rate. Observation `time` is publication time, `availableAt` includes the
+delay, and selection/order follow publication rather than future settlement.
+The event identity includes both times, preserving successive predictions for
+one settlement. All mappings and timing assumptions enter the processed recipe.
+
+```js
+const source = await openMarketSource({
+  venue: 'okx', kind: 'funding', manifestPath, startTime, endTime,
+  funding: { source: 'okx-history', rateRole: 'realized',
+    publicationTime: 'settlement-assumption' },
+});
+```
+
+The derivative bridge requires realized roles in both manifest and records,
+with publication and availability at settlement. Archive, predicted, delayed,
+and late-published rates cannot silently become settlement cashflows. Old
+processed funding artifacts need a new explicitly declared processing recipe.
 
 ## Cleanup and publication
 

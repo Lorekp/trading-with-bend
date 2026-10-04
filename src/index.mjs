@@ -11,12 +11,13 @@ export { cappedLots, affordableLots, trainingAllowed, modelReady, canReadPartiti
 export { validateModelArtifact, EvaluationSession } from './research.mjs';
 export { runExperiment, enqueueExperiment, runQueue, listExperiments, recoverExperiment, recoverQueue, cancelExperiment, queueStatus, readExperimentResult, verifyExperimentArtifacts, deterministicSeed } from './experiments.mjs';
 export { createCampaign } from './campaigns.mjs';
+export { withVerifiedPreflight } from './campaign-preflight.mjs';
 export { releaseCampaignFinal } from './campaign-final.mjs';
 export { createWorkerBundle, verifyWorkerBundle } from './worker-bundle.mjs';
 export { parameterGrid, gridJobs } from './search.mjs';
 export { walkForwardSplits, foldRows, trainingWindow, evaluationWindow, withFinalHoldout, regularReturns, comparisonTable } from './evaluation.mjs';
 export { RollingFeatures, computeFeatures, featureSchema, validateFeatureArtifact } from './features.mjs';
-export { fitStandardScaler, transformFeatures, fitRidge, predictRidge, evaluateRegression, validateRidgeModel, regressionMetrics } from './models.mjs';
+export { fitStandardScaler, transformFeatures, fitRidge, createRidgePredictor, predictRidge, evaluateRegression, validateRidgeModel, regressionMetrics } from './models.mjs';
 export { targetPosition, buyAndHold, movingAverageCrossover, meanReversion } from './strategies.mjs';
 export { QUOTE_UNITS, parseQuoteCsv, validateTicks, syntheticQuotes } from './data.mjs';
 export { loadBinanceBars, loadBinanceSeries } from './binance-bars.mjs';

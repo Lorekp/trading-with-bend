@@ -1,6 +1,6 @@
 import { checked, hash, nat, requireThat } from './core.mjs';
 import { RollingFeatures } from './features.mjs';
-import { fitRidge, predictRidge } from './models.mjs';
+import { fitRidge, createRidgePredictor } from './models.mjs';
 import { cappedLots } from './policies.mjs';
 import { trainingWindow as createTrainingWindow } from './evaluation.mjs';
 
@@ -158,7 +158,7 @@ export function createBarStrategy(spec) {
         const completed = checked(now + trainingTime, 'training completion'), deployed = checked(completed + deploymentDelay, 'model deployment');
         const model = fitRidge({ training: createTrainingWindow(rows, { fold, cutoff: time }), schema, trainingStartedAt: time, trainingCompletedAt: String(completed), deployedAt: String(deployed), alpha });
         if (recordModels) modelArtifacts.push(model);
-        pending = { model, fold }; lastFitIndex = index;
+        pending = { model, predict: createRidgePredictor({ model, schema, fold }) }; lastFitIndex = index;
         diagnostics.fits.push({ fold, modelHash: model.hash, preprocessingHash: model.preprocessingHash, trainingDataHash: model.trainingDataHash, rowCount: rows.length,
           firstObservationTime: rows[0].feature.time, lastObservationTime: rows.at(-1).feature.time, lastLabelAvailableAt: model.lastLabelAvailableAt,
           cutoff: model.trainingCutoff, trainingStartedAt: model.trainingStartedAt, trainingCompletedAt: model.trainingCompletedAt, deployedAt: model.deployedAt });
@@ -166,7 +166,7 @@ export function createBarStrategy(spec) {
       }
       if (!feature.ready) { diagnostics.warmupBars++; return null; }
       if (!active) { diagnostics.waitingForDeploymentBars++; return null; }
-      const prediction = predictRidge({ model: active.model, feature, schema, fold: active.fold, decisionTime: time });
+      const prediction = active.predict({ feature, decisionTime: time });
       previousPrediction = prediction; diagnostics.predictions++;
       diagnostics.predictionHashChain = hash({ previous: diagnostics.predictionHashChain, predictionHash: prediction.hash });
       diagnostics.lastPrediction = { ...prediction, modelDeployedAt: active.model.deployedAt, trainingCutoff: active.model.trainingCutoff };

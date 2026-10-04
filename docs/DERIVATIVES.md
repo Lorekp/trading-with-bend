@@ -209,8 +209,11 @@ explicit liquidity assumption:
 Each update replenishes its assumed liquidity budget. Neither model reproduces
 queue position, persistent book depletion, market impact or an exchange fill
 guarantee. Bars cannot supply actual executable quotes. All series must belong
-to the same venue and declared market. Delayed funding/book observations cannot
-be used as executable events. Equal-time cross-series order is explicitly mark,
+to the same venue and declared market. Funding must explicitly declare a
+`realized` role in its processed source and records, with publication and
+availability at settlement. See [funding contracts](MARKET_DATA.md#funding-contracts).
+Archive/predicted rates and delayed funding/book observations cannot be used as
+executable events. Equal-time cross-series order is explicitly mark,
 funding, quote; input series are never sorted to repair regressions.
 
 Reference mark closes become usable at publication time. Funding uses the latest

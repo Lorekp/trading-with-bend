@@ -55,6 +55,7 @@ Intentional identity collisions fail rather than silently replacing old evidence
 | `src/search.mjs` | Bounded deterministic parameter grids, validation-only search jobs |
 | `src/experiments.mjs` | Immutable manifests, shared resource admission, continuous discovery, cancellation, telemetry, output limits and explicit dead-owner recovery |
 | `src/campaigns.mjs` | Frozen campaign specification, search budget, complete trial membership, sealing and authoritative validation selection |
+| `src/campaign-preflight.mjs` | Verified diagnostic reuse across capacity stops, immutable stop evidence and fresh checks before admission |
 | `src/worker-bundle.mjs` | Verified toolkit/package snapshots, declared input copies and filesystem-constrained execution |
 | `src/campaign-final.mjs` | Selected-artifact verification and canonical single-use final release |
 | `src/study-cache.mjs` | Verified reuse of complete validation-fold artifacts across attempts |
@@ -302,6 +303,50 @@ Live owners and ambiguous PID reuse block recovery. Failed or completed jobs do
 not automatically retry. Seal only when the accepted population and intended
 recovery decisions are fixed.
 
+For capacity stops after a completed diagnostic, use
+`withVerifiedPreflight({ directory, identityHash, diagnostic, checkCapacity }, admit)`.
+It never enqueues, reruns or recovers the diagnostic. On the first invocation it
+pins its registry/key, specification/configuration, frozen bundle, attempt,
+result and artifact inventory. Every invocation verifies those identities and
+bytes, including frozen inputs and the bundle's Node/platform/architecture.
+Queued, failed, abandoned and unfrozen diagnostics cannot be reused.
+
+Compute `identityHash` from the current study/data/protocol and candidate
+worker/helper/toolkit contents. A matching hash is the caller's attestation
+that these are unchanged; the helper cannot inspect arbitrary closures or
+discover undeclared candidate dependencies. Changed research identity needs a
+new diagnostic and preflight directory. A revised capacity policy may reuse
+the same diagnostic under the same research identity.
+
+```js
+await withVerifiedPreflight({
+  directory: join(root, 'preflight'),
+  identityHash: hash({ studyPlan, datasetHash, candidateSourceHashes }),
+  diagnostic: { registry: diagnosticRegistry, key: diagnosticKey },
+  checkCapacity({ job, result }) {
+    // Measure now; include disk headroom, projected output and memory limits.
+    const capacity = measureCapacity(job, result);
+    return { ...capacity, allowed: capacity.projectedFreeBytes >= minimumFreeBytes
+      && capacity.projectedMemoryBytes <= memoryBudgetBytes };
+  },
+}, ({ result }) => {
+  const campaign = createCampaign(root, specificationFrom(result.study));
+  for (const job of candidates) campaign.submit(job);
+  return campaign.seal();
+});
+```
+
+Each invocation publishes a new immutable `checks/<id>.json` before admission.
+Denial raises `CAMPAIGN_CAPACITY`; a failed measurement records its error and
+also prevents admission. The first denial is retained as `stop.json` and is
+verified on subsequent invocations. `diagnostic.json` and the original stop
+are never overwritten. Successful checks are not reusable authorizations:
+the next invocation must measure again. Admission callbacks should use the
+campaign's existing idempotent submission interface for restart safety.
+This is cooperative orchestration, not a disk reservation or an accounting
+change. Concurrent workers still require the shared queue admission budget;
+capacity can change after measurement.
+
 `evaluateStudy` can reuse complete validation folds through
 `resume: { directory, preparationHash, previousDirectories }`. The preparation
 hash must attest to callback/import contents, strategy/model configuration,
@@ -415,8 +460,16 @@ start, completion, deployment and decision times form an explicit availability
 chain. The ridge objective is summed squared error plus alpha times squared
 standardized coefficients; the intercept is not penalized.
 
-`predictRidge` checks artifact content, schema order/units, fold, deployment and
-feature availability, returning a hashed prediction.
+`createRidgePredictor({ model, schema, fold })` validates model/scaler hashes,
+shapes, training IDs, lineage and chronology once, retaining a private immutable
+copy. Its returned function accepts `{ feature, decisionTime }` and checks
+feature hash, schema, readiness, finite values, deployment and availability on
+every call. Admission takes O(training rows + feature count); each prediction
+takes O(feature count), independent of training-history length. Mutating an
+imported model or schema after admission cannot alter the predictor.
+`predictRidge` is the one-shot form, including admission, returning the same
+hashed prediction. Streaming callers should retain a predictor per fitted
+model; evaluation and the walk-forward bar strategy do this internally.
 `evaluateRegression({ model, evaluation, schema })` accepts the validation
 artifact from `foldRows` directly. It verifies artifact contents, dataset, split
 plan, fold and cutoff against the model, never fits, and rejects training IDs or

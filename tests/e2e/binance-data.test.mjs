@@ -277,13 +277,13 @@ async function okxFixture(t, kind, content, { corruptCrc = false } = {}) {
   if (kind === 'bookTicker') {
     const pack = tar.pack(); pack.entry({ name: 'book.data' }, content); pack.finalize();
     bytes = gzipSync(Buffer.concat(await collect(pack))); filename = 'book.tar.gz';
-  } else if (kind === 'premium') { bytes = Buffer.from(JSON.stringify(content)); filename = 'premium.json'; }
+  } else if (['premium', 'funding'].includes(kind)) { bytes = Buffer.from(JSON.stringify(content)); filename = `${kind}.json`; }
   else {
     bytes = makeZip(content, { name: 'ETH-USDT-SWAP.csv' }); filename = 'market.zip';
     if (corruptCrc) { bytes.writeUInt32LE(0, 14); bytes.writeUInt32LE(0, bytes.readUInt32LE(bytes.length - 6) + 16); }
   }
   writeFileSync(join(raw, filename), bytes);
-  const type = { bars: 'candles1m', trades: 'trades', bookTicker: 'l2Book400', premium: 'premiumHistory' }[kind];
+  const type = { bars: 'candles1m', trades: 'trades', bookTicker: 'l2Book400', premium: 'premiumHistory', funding: 'fundingRate' }[kind];
   const manifestPath = join(raw, 'manifest.json');
   writeFileSync(manifestPath, JSON.stringify({ schema: 'okx-download-v1', symbol: 'ETH-USDT-SWAP', datasets: [
     { type, status: 'complete', files: [{ path: filename, bytes: bytes.length, sha256: sha(bytes), status: 'verified' }] },
@@ -291,6 +291,44 @@ async function okxFixture(t, kind, content, { corruptCrc = false } = {}) {
   return { manifestPath, parent, raw, outputDirectory: join(parent, 'processed'), venue: 'okx', kind, startTime: '0', endTime: '120000' };
 }
 const bookRow = (ts, action = 'snapshot', bids = [['2000', '1']], asks = [['2001', '2']]) => JSON.stringify({ instId: 'ETH-USDT-SWAP', action, ts: String(ts), bids, asks });
+
+test('funding contracts distinguish archive, prediction and realized fields with separate publication and settlement times', async t => {
+  const row = { instId: 'ETH-USDT-SWAP', fundingTime: '100', ts: '110', fundingRate: '0.01', realizedRate: '-0.02' };
+  const input = await okxFixture(t, 'funding', [row]);
+  await assert.rejects(openMarketSource(input), code('FUNDING_CONTRACT'));
+  const archive = { source: 'okx-archive', rateRole: 'archive', publicationTime: 'settlement-assumption' };
+  const history = { source: 'okx-history', rateRole: 'realized', publicationTime: 'ts' };
+  const archived = await collect((await openMarketSource({ ...input, funding: archive })).records());
+  assert.deepEqual(archived[0].data.rate, { numerator: '1', denominator: '100' });
+  assert.equal(archived[0].data.rateRole, 'archive');
+  const source = await openMarketSource({ ...input, funding: history, publicationDelayMs: '5' });
+  const manifest = await prepareMarketData({ source, outputDirectory: input.outputDirectory });
+  assert.equal(manifest.recipe.source.funding.rateField, 'realizedRate');
+  const records = await collect(readProcessedData({ manifestPath: join(input.outputDirectory, 'manifest.json') }));
+  assert.deepEqual(records[0], { time: '110', availableAt: '115', data: { eventId: '100:110',
+    rate: { numerator: '-1', denominator: '50' }, rateRole: 'realized', settlementTime: '100', publishedAt: '110' } });
+  const visible = await collect(asOfMarketData(records, ['114', '115'], { maxAgeMs: '100' }));
+  assert.equal(visible[0].observation, null); assert.deepEqual(visible[1].observation, records[0]);
+  const missing = await okxFixture(t, 'funding', [{ ...row, realizedRate: undefined }]);
+  await assert.rejects(collect((await openMarketSource({ ...missing, funding: history })).records()), code('DATA_DECIMAL'));
+  const early = await okxFixture(t, 'funding', [{ ...row, ts: '99' }]);
+  await assert.rejects(collect((await openMarketSource({ ...early, funding: history })).records()), code('FUNDING_TIMING'));
+  await assert.rejects(openMarketSource({ ...input, funding: { ...history, source: 'okx-current' } }), code('FUNDING_CONTRACT'));
+
+  const prediction = { source: 'okx-current', rateRole: 'predicted', publicationTime: 'ts' };
+  const predicted = await okxFixture(t, 'funding', [10, 20].map(ts => ({ ...row, ts: String(ts), fundingTime: '200000' })));
+  const predictions = await collect((await openMarketSource({ ...predicted, funding: prediction })).records());
+  assert.deepEqual(predictions.map(value => value.time), ['10', '20']);
+  assert.ok(predictions.every(value => value.data.settlementTime === '200000'));
+  assert.notEqual(predictions[0].data.eventId, predictions[1].data.eventId);
+  await assert.rejects(openMarketSource({ ...predicted, funding: { ...prediction, publicationTime: 'settlement-assumption' } }), code('FUNDING_CONTRACT'));
+  await assert.rejects(collect((await openMarketSource({ ...input, funding: prediction })).records()), code('FUNDING_TIMING'));
+
+  const binance = fixture(t, 'calc_time,funding_interval_hours,last_funding_rate\n0,8,9.2E-7\n', { type: 'fundingRate' });
+  const adapted = await openMarketSource({ ...binance, venue: 'binance', kind: 'funding', startTime: '0', endTime: '120000',
+    funding: { source: 'binance-archive', rateRole: 'realized', publicationTime: 'settlement-assumption' } });
+  assert.deepEqual((await collect(adapted.records()))[0].data, { eventId: '0:0', rate: { numerator: '23', denominator: '25000000' }, rateRole: 'realized', settlementTime: '0', publishedAt: '0' });
+});
 
 test('Binance and OKX archives publish the same canonical bars through the same processing interface', async t => {
   const okx = await okxFixture(t, 'bars', `${OKX_HEADER}\n${okxBar(0)}\n${okxBar(1)}\n`);

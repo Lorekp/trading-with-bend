@@ -95,9 +95,12 @@ export type Strategy<Data = Record<string, unknown>> = ((context: StrategyContex
 
 /** Data preparation does not construct or select an ExecutionVenue. */
 export type MarketDataKind = 'bars' | 'bookTicker' | 'trades' | 'markPrice' | 'indexPrice' | 'premium' | 'funding';
-export interface MarketDataConfiguration {
+export type FundingContract =
+  | { source: 'binance-archive'; rateRole: 'archive' | 'realized'; publicationTime: 'settlement-assumption' }
+  | { source: 'okx-archive' | 'okx-history'; rateRole: 'archive' | 'realized'; publicationTime: 'ts' | 'settlement-assumption' }
+  | { source: 'okx-current'; rateRole: 'predicted'; publicationTime: 'ts' };
+interface MarketDataConfigurationBase {
   venue: 'binance' | 'okx';
-  kind: MarketDataKind;
   manifestPath: string;
   startTime: Decimal;
   endTime: Decimal;
@@ -105,6 +108,10 @@ export interface MarketDataConfiguration {
   /** Exact decimal ETH per contract; explicitly pinned for OKX trades/books. */
   contractSizeETH?: string;
 }
+export type MarketDataConfiguration = MarketDataConfigurationBase & (
+  | { kind: 'funding'; funding: FundingContract }
+  | { kind: Exclude<MarketDataKind, 'funding'>; funding?: never }
+);
 export interface MarketDataSource {
   readonly manifest: Readonly<Record<string, unknown>>;
   records(): AsyncIterable<Observation>;

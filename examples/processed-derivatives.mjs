@@ -18,7 +18,8 @@ const config = { instrument, contract: { kind: 'perpetual', payoff: 'linear', co
   feeBps: '5', liquidationFeeBps: '100', slippageBps: '10', orderLatencyMs: '100', cancelLatencyMs: '100',
   maxQuoteAgeMs: '120000', maxMarkAgeMs: '120000' };
 for (const kind of ['bars', 'markPrice', 'funding']) {
-  const source = await openMarketSource({ venue: 'binance', kind, manifestPath, startTime, endTime: exclusiveEnd });
+  const source = await openMarketSource({ venue: 'binance', kind, manifestPath, startTime, endTime: exclusiveEnd,
+    ...(kind === 'funding' ? { funding: { source: 'binance-archive', rateRole: 'realized', publicationTime: 'settlement-assumption' } } : {}) });
   await prepareMarketData({ source, outputDirectory: join(root, kind) });
 }
 const quoteManifestPath = join(root, 'bars', 'manifest.json');

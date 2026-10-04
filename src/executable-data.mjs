@@ -25,6 +25,7 @@ export async function loadProcessedDerivativeData({ config: configuration, quote
   const paths = [markManifestPath, fundingManifestPath, quoteManifestPath];
   const manifests = await Promise.all(paths.map(path => processedManifest(path)));
   const sources = manifests.map(manifest => manifest.recipe.source);
+  requireThat(sources[1].funding?.rateRole === 'realized', 'FUNDING_CONTRACT', 'Settlement execution requires an explicitly realized funding source');
   const kinds = ['markPrice', 'funding', liquidity.model === 'bar-volume' ? 'bars' : 'bookTicker'];
   for (let i = 0; i < sources.length; i++) {
     const source = sources[i];
@@ -54,6 +55,8 @@ export async function loadProcessedDerivativeData({ config: configuration, quote
     const item = await iterators[index].next();
     if (item.done) { pending[index] = null; return; }
     const record = item.value;
+    if (index === 1) requireThat(record.data.rateRole === 'realized' && record.data.settlementTime === record.time
+      && record.data.publishedAt === record.time, 'FUNDING_TIMING', 'Funding execution requires realized rates published at their settlement time');
     const time = index === 1 || index === 2 && liquidity.model === 'displayed-size' ? record.time : record.availableAt;
     if (index === 1 || index === 2 && liquidity.model === 'displayed-size') {
       requireThat(record.availableAt === record.time, 'NON_EXECUTABLE_QUOTE', 'Funding and executable book events require undelayed source timestamps');

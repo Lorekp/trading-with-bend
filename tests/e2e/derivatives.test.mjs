@@ -85,12 +85,13 @@ test('processed derivative bridge verifies shards, normalizes units and makes li
     const observation = (time, row) => ({ time: String(time), availableAt: String(time), data: row });
     const series = {
       markPrice: [observation(0, { close: '100000000001' }), observation(6, { close: '110000000000' })],
-      funding: [observation(5, { rate: { numerator: '23', denominator: '25000000' } })],
+      funding: [observation(5, { rate: { numerator: '23', denominator: '25000000' }, rateRole: 'realized', settlementTime: '5', publishedAt: '5' })],
       bookTicker: [0, 1, 6].map(time => observation(time, { eventId: String(time), bid: '1000000', ask: '1000000', bidSizeLots: '1000', askSizeLots: '1000' })),
       bars: [0, 1, 6].map(time => observation(time, { close: '1000000', volumeLots: '1000' })),
     };
     for (const [kind, records] of Object.entries(series)) {
       const manifest = { venue: 'okx', kind, rawDirectory, instrument: canonical, sourceMarket: 'linear USDT perpetual',
+        ...(kind === 'funding' ? { funding: { source: 'okx-history', rateRole: 'realized', publicationTime: 'settlement-assumption' } } : {}),
         window: { startTime: '0', endTime: '7' }, expectedStepMs: null };
       await prepareMarketData({ source: { manifest, async *records() { yield* records; } }, outputDirectory: join(root, kind) });
     }
@@ -101,6 +102,18 @@ test('processed derivative bridge verifies shards, normalizes units and makes li
     assert.equal(loaded.data.events.find(event => event.type === 'quote').askLots, '100');
     assert.equal(loaded.data.events[0].price, '1000000');
     assert.deepEqual(loaded.data.events.find(event => event.type === 'funding').rate, { numerator: '23', denominator: '25000000' });
+    for (const [name, role, time, availableAt, expected] of [
+      ['archive', 'archive', '5', '5', 'FUNDING_CONTRACT'],
+      ['prediction', 'predicted', '4', '4', 'FUNDING_CONTRACT'],
+      ['late-realized', 'realized', '6', '6', 'FUNDING_TIMING'],
+      ['delayed-realized', 'realized', '5', '6', 'NON_EXECUTABLE_QUOTE'],
+    ]) {
+      const manifest = { venue: 'okx', kind: 'funding', rawDirectory, instrument: canonical, sourceMarket: 'linear USDT perpetual',
+        funding: { rateRole: role }, window: { startTime: '0', endTime: '7' }, expectedStepMs: null };
+      const record = { time, availableAt, data: { ...series.funding[0].data, rateRole: role, publishedAt: time } };
+      await prepareMarketData({ source: { manifest, async *records() { yield record; } }, outputDirectory: join(root, name) });
+      await assert.rejects(loadProcessedDerivativeData({ ...options, fundingManifestPath: join(root, name, 'manifest.json') }), { code: expected });
+    }
     const venue = new DerivativeExecutionVenue({ id: loaded.identity, config: c, data: loaded.data });
     venue.advanceTo('0'); venue.setTarget('100', '0'); venue.advanceTo('6'); venue.finish('6');
     assert.equal(venue.report().performance.funding, '-92');

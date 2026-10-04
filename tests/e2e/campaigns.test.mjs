@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createCampaign } from '../../src/campaigns.mjs';
+import { withVerifiedPreflight } from '../../src/campaign-preflight.mjs';
 import { hash } from '../../src/core.mjs';
 import { enqueueExperiment, listExperiments, runQueue } from '../../src/experiments.mjs';
 import { evaluateStudy } from '../../src/study.mjs';
@@ -16,6 +17,68 @@ import { targetPosition } from '../../src/strategies.mjs';
 import { sourceManifest } from '../../src/provenance.mjs';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
+
+test('verified preflight resumes after capacity stops, preserving evidence and gating real campaign admission', async t => {
+  const f = await fixture(t), registry = join(f.directory, 'diagnostics'), directory = join(f.directory, 'preflight');
+  const key = 'cash-diagnostic';
+  enqueueExperiment(registry, { ...f.job(key), frozen: true, constrained: true });
+  const identityHash = hash({ spec: f.spec, candidates: ['candidate'], worker: readFileSync(f.workerModule, 'utf8') });
+  let checks = 0, admissions = 0, freeBytes = 0;
+  const options = { directory, identityHash, diagnostic: { registry, key }, checkCapacity({ result, originalStop }) {
+    checks++;
+    assert.equal(result.study.hash, f.study.hash);
+    if (checks > 1) assert.equal(originalStop.capacity.freeBytes, 0);
+    return { allowed: freeBytes >= 100, freeBytes, requiredBytes: 100 };
+  } };
+  const admit = ({ result, capacity }) => {
+    admissions++;
+    assert.equal(result.study.hash, f.study.hash); assert.equal(capacity.allowed, true);
+    return f.campaign.submit(f.job('candidate'));
+  };
+  await assert.rejects(withVerifiedPreflight(options, admit), { code: 'PREFLIGHT_DIAGNOSTIC' });
+  assert.equal(checks, 0);
+  await runQueue(registry, { timeoutMs: 30000 });
+  const diagnosticBefore = listExperiments(registry);
+  await assert.rejects(withVerifiedPreflight(options, admit), { code: 'CAMPAIGN_CAPACITY' });
+  const stopPath = join(directory, 'stop.json'), original = readFileSync(stopPath, 'utf8');
+  assert.equal(f.campaign.report().population.length, 0);
+  freeBytes = 50;
+  await assert.rejects(withVerifiedPreflight(options, admit), { code: 'CAMPAIGN_CAPACITY' });
+  assert.equal(readFileSync(stopPath, 'utf8'), original);
+  freeBytes = 200;
+  await assert.rejects(withVerifiedPreflight({ ...options, identityHash: hash('changed candidates') }, admit), { code: 'PREFLIGHT_IDENTITY' });
+  assert.equal(checks, 2);
+  // Artifacts, result and frozen bundle are reverified before every capacity check.
+  const attempt = diagnosticBefore[0].attempts.at(-1);
+  for (const path of [join(attempt.outputDirectory, 'validation.json'), attempt.resultPath]) {
+    const saved = readFileSync(path);
+    writeFileSync(path, '{}');
+    await assert.rejects(withVerifiedPreflight(options, admit), error => ['RESULT_CHANGED', 'ARTIFACT_CHANGED'].includes(error.code));
+    writeFileSync(path, saved);
+  }
+  assert.equal(checks, 2);
+  await withVerifiedPreflight(options, admit);
+  assert.equal(checks, 3); assert.equal(admissions, 1);
+  assert.equal(readFileSync(stopPath, 'utf8'), original);
+  assert.equal(readdirSync(join(directory, 'checks')).length, 3);
+  assert.deepEqual(listExperiments(registry), diagnosticBefore, 'Diagnostic must not be rerun or recovered');
+  f.campaign.seal();
+  const report = await f.campaign.run({ timeoutMs: 30000 });
+  assert.equal(report.complete, true); assert.equal(report.population.length, 1);
+  // A previous successful capacity check never authorizes a later call.
+  freeBytes = 0;
+  await assert.rejects(withVerifiedPreflight(options, admit), { code: 'CAMPAIGN_CAPACITY' });
+  assert.equal(admissions, 1);
+  await assert.rejects(withVerifiedPreflight({ ...options, checkCapacity: () => { throw new Error('measurement failed'); } }, admit), /measurement failed/);
+  assert.equal(readFileSync(stopPath, 'utf8'), original);
+  const corrupt = JSON.parse(original); corrupt.capacity.freeBytes = 999;
+  writeFileSync(stopPath, JSON.stringify(corrupt));
+  await assert.rejects(withVerifiedPreflight(options, admit), { code: 'PREFLIGHT_CORRUPT' });
+  writeFileSync(stopPath, original);
+  const bundleFile = join(diagnosticBefore[0].bundle.path, 'experiments/test/worker.mjs');
+  writeFileSync(bundleFile, 'export default () => null;');
+  await assert.rejects(withVerifiedPreflight(options, admit), { code: 'BUNDLE_CORRUPT' });
+});
 
 async function fixture(t, options = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'bend-campaign-'));

@@ -124,12 +124,28 @@ export function validateRidgeModel({ model, schema, fold, decisionTime }) {
   return true;
 }
 
-export function predictRidge({ model, feature, schema, fold, decisionTime }) {
-  validateRidgeModel({ model, schema, fold, decisionTime }); validateFeatureArtifact(feature, schema);
+/** Admit a private immutable snapshot once; prediction cost depends only on feature count. */
+export function createRidgePredictor({ model, schema, fold }) {
+  model = freeze(structuredClone(model));
+  schema = featureSchema(schema);
+  validateRidgeModel({ model, schema, fold, decisionTime: model?.deployedAt });
+  return Object.freeze(({ feature, decisionTime }) => predictAdmittedRidge({ model, feature, schema, fold, decisionTime }));
+}
+
+function predictAdmittedRidge({ model, feature, schema, fold, decisionTime }) {
+  requireThat(modelReady({ labelAvailableAt: model.lastLabelAvailableAt, trainingStartedAt: model.trainingStartedAt,
+    trainingCompletedAt: model.trainingCompletedAt, deployedAt: model.deployedAt, decisionTime }),
+  'MODEL_NOT_AVAILABLE', 'Model training or deployment is unavailable at decision time');
+  validateFeatureArtifact(feature, schema);
   requireThat(nat(feature.availableAt, 'feature.availableAt') <= nat(decisionTime, 'decisionTime'), 'FEATURE_AVAILABILITY', 'Prediction feature was unavailable at decision time');
-  const values = transformFeatures({ scaler: model.preprocessing, feature, schema, fold });
+  const values = feature.values.map((value, col) => finite((value - model.preprocessing.means[col]) / model.preprocessing.scales[col], 'standardized feature'));
   const prediction = finite(values.reduce((sum, value, col) => sum + value * model.coefficients[col], model.intercept), 'prediction');
   return seal({ format: 'ridge-prediction-v1', modelHash: model.hash, preprocessingHash: model.preprocessingHash, featureHash: feature.hash, featureSchemaHash: model.featureSchemaHash, fold, decisionTime, prediction });
+}
+
+/** One-shot prediction, including admission; reuse createRidgePredictor for a stream. */
+export function predictRidge({ model, feature, schema, fold, decisionTime }) {
+  return createRidgePredictor({ model, schema, fold })({ feature, decisionTime });
 }
 
 /** Evaluates fitted parameters with intact partition lineage; never fits or selects a model. */
@@ -140,7 +156,7 @@ export function evaluateRegression({ model, evaluation, schema }) {
   requireThat(Array.isArray(rows) && rows.length > 0, 'EVALUATION_DATA', 'Evaluation rows are required');
   const fold = partition === 'final' ? model.fold : evaluation.fold;
   const decisionTime = row => row.decisionTime ?? row.feature.availableAt;
-  validateRidgeModel({ model, schema, fold, decisionTime: decisionTime(rows[0]) });
+  const predict = createRidgePredictor({ model, schema, fold });
   if (model.planHash !== null) {
     requireThat(evaluation.datasetHash === model.datasetHash, 'DATASET_MISMATCH', 'Evaluation belongs to another dataset');
     requireThat(evaluation.planHash === model.planHash, 'SPLIT_MISMATCH', 'Evaluation belongs to another split plan');
@@ -155,7 +171,7 @@ export function evaluateRegression({ model, evaluation, schema }) {
     finite(row.target, 'evaluation target');
     requireThat(nat(row.labelAvailableAt, 'labelAvailableAt') >= nat(row.feature.time, 'feature.time'), 'EVALUATION_DATA', 'Evaluation label precedes observation');
     requireThat(nat(row.feature.time, 'feature.time') >= nat(model.trainingCutoff, 'trainingCutoff'), 'EVALUATION_PARTITION', 'Evaluation observations must be at or after the exclusive training cutoff');
-    return predictRidge({ model, feature: row.feature, schema, fold, decisionTime: decisionTime(row) });
+    return predict({ feature: row.feature, decisionTime: decisionTime(row) });
   });
   const metrics = regressionMetrics(predictions.map(prediction => prediction.prediction), rows.map(row => row.target));
   return seal({ format: 'regression-evaluation-v2', modelHash: model.hash, fold, partition, rowCount: rows.length, ...metrics,
