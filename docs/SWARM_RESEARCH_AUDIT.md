@@ -74,8 +74,7 @@ of the narrowly validated `evaluateStudy.protocol`.
 ## Downloaded data and readiness
 
 The active worktree has no `data/`, `node_modules/`, generated `build/`, or prior
-`output/` directory. Downloads were located in the main checkout at
-`data`.
+`output/` directory. Downloads were located in the main checkout's local `data/` directory.
 
 Manifest-only inspection found January through September 2026 for Binance
 ETHUSDT and OKX ETH-USDT-SWAP:

@@ -130,6 +130,6 @@ Checkpoints replay their saved event prefix rather than restoring in constant ti
 
 This repository contains the project-specific framework and integration work. Bend, Bun, Lean, Node.js and the declared JavaScript/Python dependencies are external projects; their respective licenses apply. [toolchain.json](toolchain.json) pins the Bend revision and toolchain versions. Research documentation records AI-assisted implementation and review.
 
-The bundled [QuantConnect Writing Algorithms snapshot](docs/quantconnect-writing-algorithms/README.md) is third-party reference material, with its own source/provenance records. It is not this framework's implementation, and its presence does not imply QuantConnect affiliation.
+The research skills cite [QuantConnect's Writing Algorithms documentation](https://www.quantconnect.com/docs/v2/writing-algorithms) as external reference material. That documentation is not bundled, and this project is not affiliated with QuantConnect.
 
-No repository-wide license file was present in the reviewed snapshot. Do not infer an open-source license for the project or redistribution rights for third-party documentation from repository access alone.
+No repository-wide license grant has been selected. Public source access does not grant an open-source license; dependency and reference-material terms remain separate.

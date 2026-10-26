@@ -8,8 +8,6 @@ data/
 __pycache__/
 *.pyc
 
-# Preserve the readable documentation snapshot; keep bulky download caches local.
+# Keep optional third-party reference downloads local; cite the official sources.
 /docs/quantconnect-writing-algorithms.zip
-/docs/quantconnect-writing-algorithms/raw/
-/docs/quantconnect-writing-algorithms/source/
-/docs/quantconnect-writing-algorithms/landing.raw.html
+/docs/quantconnect-writing-algorithms/

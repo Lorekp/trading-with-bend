@@ -2,7 +2,7 @@
 
 These skills distill QuantConnect's Writing Algorithms documentation into workflows for **trading-with-bend**. They use the local APIs and economic contracts; they do not introduce QuantConnect/LEAN dependencies or compatibility wrappers. The main influence is the research guide's emphasis on a hypothesis, bias control, out-of-sample evaluation and retaining evidence against an idea.
 
-The source documentation was downloaded on 2026-10-03. Its official source snapshot is `fc50f126f5c47748e0667b898c9af4c7583da5e3`; see [the archived source identity](quantconnect-writing-algorithms/source-snapshot.json). Each skill's supporting references cite the relevant original pages and name the local source/documents used for the translation. New artifact shapes and falsification suggestions are identified as local adaptations.
+The source documentation was consulted on 2026-10-03 at [QuantConnect/Documentation revision `fc50f126f5c47748e0667b898c9af4c7583da5e3`](https://github.com/QuantConnect/Documentation/tree/fc50f126f5c47748e0667b898c9af4c7583da5e3). The third-party documentation is not bundled. Each skill's supporting references cite the relevant original pages and name the local source/documents used for the translation. New artifact shapes and falsification suggestions are identified as local adaptations.
 
 ## Entry point and specialist skills
 
