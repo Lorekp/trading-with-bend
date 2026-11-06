@@ -1,8 +1,10 @@
 # Trading with Bend
 
-A research backtesting framework with a Bend cash-accounting and order-matching core, a Node.js replay and experiment layer, and an optional Python forecasting backend. It makes execution assumptions, data availability, experiment identity and the scope of verification explicit.
+Trading with Bend is a framework for automated trading-strategy research with AI agents. It combines a market simulator, reproducible experiments and a formally verified core to help catch misleading backtests before their results are trusted.
 
-The project is a working reference simulator and research toolkit. Its formal laws cover selected accounting and policy properties; they do not establish realistic fills or profitable trading strategies.
+Automated research can find strategies that appear profitable because of accounting errors, future data leaking into tests or selecting winners from many failed trials. The framework addresses those problems with exact accounting, checks on data availability, an experiment registry that retains failed trials and controlled access to final evaluation data.
+
+The Bend core has **32 machine-checked laws** covering selected accounting, order-handling, data-visibility and research-policy properties. Node.js handles replay and experiment orchestration; an optional Python backend supports forecasting models. Each run records its inputs and configuration so results can be traced and reproduced.
 
 ## What it implements
 
@@ -82,7 +84,7 @@ npm run proof
 
 On Linux x86-64, install the official Lean archive matching the version and SHA-256 in [toolchain.json](toolchain.json) under `.tools/`, then run `bash scripts/build-kernel.sh` and `npm run proof`. The CI workflow contains the exact download/checksum/extraction sequence. Without project-local Lean, ordinary builds record `kernel: not-checked`; explicit proof runs require a working kernel toolchain or `BENDTT`.
 
-[LAWS.bend](LAWS.bend) specifies 32 accounting, cancellation, allocation, compaction, data-visibility and research-policy laws, with proofs in [PROOF.bend](PROOF.bend). Their scope matters: an accepted-admission branch preserving a ledger does not prove the risk predicate correct, and a bounded allocation primitive does not prove the whole matcher correct. Compiler translation, the generated runtime, Node/Python code, filesystem operations, vendor data and economic assumptions remain outside these source-level proofs. Integration tests and runtime checks address parts of those layers separately.
+[LAWS.bend](LAWS.bend) specifies 32 accounting, cancellation, allocation, compaction, data-visibility and research-policy laws, with proofs in [PROOF.bend](PROOF.bend). Each law has a specific scope: ledger preservation on an accepted-admission branch leaves the risk predicate outside the proof, and a bounded allocation proof covers that primitive rather than the whole matcher. Compiler translation, the generated runtime, Node/Python code, filesystem operations, vendor data and economic assumptions remain outside these source-level proofs. Integration tests and runtime checks address parts of those layers separately. Proofs and passing backtests do not establish realistic fills or profitable live trading.
 
 ## Market data and research
 
@@ -90,7 +92,7 @@ Real-data studies require separately obtained and validated data. Downloaded arc
 
 The older ETH bar example described in [ETH_EXPERIMENTS.md](docs/ETH_EXPERIMENTS.md) requires the documented Binance data and uses perpetual prices as a **cash-price proxy**. It must not be interpreted as perpetual-futures execution evidence.
 
-The [documented ETH intraday campaign](docs/ETH_INTRADAY_CAMPAIGN_2026_10_03.md) reports no acceptable strategy: all twelve base candidates and six stress candidates lost money after costs, and no final data was released. It used seven development days and synthetic bid/ask quotes derived from completed bars. The document links to ignored local evidence directories; the complete underlying artifacts are not part of the checkout, and the reported experiment has not been independently rerun here.
+The [documented ETH intraday campaign](docs/ETH_INTRADAY_CAMPAIGN_2026_10_03.md) reports no acceptable strategy: all twelve base candidates and six stress candidates lost money after costs, and no final data was released. It used seven development days and synthetic bid/ask quotes derived from completed bars. The document links to local evidence directories; the complete underlying artifacts are not included in the checkout.
 
 For optional forecasting, follow [FORECASTING.md](docs/FORECASTING.md). Its default demo uses deterministic synthetic data. Python 3.12 is the documented tested interpreter, with versions pinned in `requirements-ml.txt`:
 
